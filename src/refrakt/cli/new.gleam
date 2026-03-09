@@ -3,6 +3,7 @@
 import gleam/io
 import gleam/list
 import gleam/string
+import refrakt/cli/format
 import refrakt/cli/templates
 import refrakt/cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 import simplifile
@@ -100,6 +101,17 @@ pub fn run(path: String, flags: List(String)) {
     let #(file_path, content) = file
     let assert Ok(_) = simplifile.write(file_path, content)
   })
+
+  // Format generated Gleam files
+  let gleam_paths =
+    list.filter_map(files, fn(file) {
+      let #(fp, _) = file
+      case string.ends_with(fp, ".gleam") {
+        True -> Ok(fp)
+        False -> Error(Nil)
+      }
+    })
+  format.format_files(gleam_paths)
 
   // Print results
   io.println("  " <> path <> "/")

@@ -4,6 +4,7 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/string
+import refrakt/cli/format
 import refrakt/cli/project
 import refrakt/cli/templates
 import refrakt/cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
@@ -49,8 +50,10 @@ pub fn placeholder_test() {
   ensure_dir_for(test_path)
   let assert Ok(_) = simplifile.write(test_path, test_content)
 
-  // Patch router
+  // Patch router and format
   let _ = patch_router_page(app, name)
+  let router_path = "src/" <> app <> "/router.gleam"
+  format.format_files([handler_path, test_path, router_path])
 
   io.println("")
   io.println("Created:")
@@ -58,7 +61,7 @@ pub fn placeholder_test() {
   io.println("  " <> test_path)
   io.println("")
   io.println("Updated:")
-  io.println("  src/" <> app <> "/router.gleam")
+  io.println("  " <> router_path)
 }
 
 // =============================================================================
@@ -154,8 +157,13 @@ pub fn resource(name: String, raw_fields: List(String)) {
   let assert Ok(_) =
     simplifile.write(test_path, resource_test(app, singular, type_name, fields))
 
-  // Patch router
+  // Patch router and format
   let _ = patch_router_resource(app, name, singular)
+  let router_path = "src/" <> app <> "/router.gleam"
+  format.format_files([
+    handler_path, views_path, form_path, domain_path, repo_path, test_path,
+    router_path,
+  ])
 
   io.println("")
   io.println("Created:")
@@ -239,8 +247,17 @@ pub fn auth() {
     let assert Ok(_) = simplifile.write(path, content)
   })
 
-  // Patch router
+  // Patch router and format
   let _ = patch_router_auth(app)
+  let router_path = "src/" <> app <> "/router.gleam"
+  let gleam_paths =
+    list.filter_map(files, fn(file) {
+      case string.ends_with(file.0, ".gleam") {
+        True -> Ok(file.0)
+        False -> Error(Nil)
+      }
+    })
+  format.format_files([router_path, ..gleam_paths])
 
   io.println("")
   io.println("Created:")
@@ -268,6 +285,7 @@ pub fn island(name: String) {
 
   let assert Ok(_) = simplifile.write(island_path, island_module(name))
   let assert Ok(_) = simplifile.write(embed_path, island_embed(app, name))
+  format.format_files([island_path, embed_path])
 
   io.println("")
   io.println("Created:")

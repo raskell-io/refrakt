@@ -19,3 +19,5 @@ Thumbs.db
 # Test artifacts
 /test_app/
 /tmp/
+*.db
+erl_crash.dump

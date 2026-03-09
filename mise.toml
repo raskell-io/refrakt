@@ -86,6 +86,10 @@ run = "cd test_app && gleam run -m refrakt_cli -- gen resource posts title:strin
 description = "Remove test_app/ created by cli:new"
 run = "rm -rf test_app/"
 
+[tasks."cli:build"]
+description = "Build the standalone refrakt CLI binary"
+run = "./bin/build-cli.sh"
+
 # =============================================================================
 # Release
 # =============================================================================
