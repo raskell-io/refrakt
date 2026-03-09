@@ -124,7 +124,7 @@ pub fn resource(name: String, raw_args: List(String)) {
     True ->
       simplifile.write(
         handler_path,
-        api_resource_handler(app, name, singular, type_name, db),
+        api_resource_handler(app, name, singular, type_name, db, fields),
       )
     False ->
       simplifile.write(
@@ -351,6 +351,7 @@ fn live_component(_app: String, name: String) -> String {
 ///
 import gleam/int
 import lustre
+import lustre/effect
 import lustre/element.{text}
 import lustre/element/html.{button, div, h1, p}
 import lustre/event
@@ -364,14 +365,14 @@ pub type Msg {
   Decrement
 }
 
-pub fn init(_flags: Nil) -> Model {
-  Model(count: 0)
+pub fn init(_flags: Nil) -> #(Model, effect.Effect(Msg)) {
+  #(Model(count: 0), effect.none())
 }
 
-pub fn update(model: Model, msg: Msg) -> Model {
+pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
   case msg {
-    Increment -> Model(count: model.count + 1)
-    Decrement -> Model(count: model.count - 1)
+    Increment -> #(Model(count: model.count + 1), effect.none())
+    Decrement -> #(Model(count: model.count - 1), effect.none())
   }
 }
 
@@ -386,9 +387,9 @@ pub fn view(model: Model) -> element.Element(Msg) {
   ])
 }
 
-/// Create a Lustre app for this component.
+/// Create a Lustre application for server-side rendering.
 pub fn app() {
-  lustre.simple(init, update, view)
+  lustre.application(init, update, view)
 }
 "
 }
@@ -396,30 +397,82 @@ pub fn app() {
 fn live_socket(app: String, name: String) -> String {
   "/// WebSocket transport for the " <> name <> " server component.
 ///
-/// This module handles the WebSocket connection between the browser
-/// and the Lustre server component. It needs to be wired into your
-/// router for the WebSocket upgrade.
+/// This module handles the WebSocket connection between the Lustre
+/// server component and the browser client runtime.
 ///
-/// TODO: Wire this into your router by adding a WebSocket route:
+/// ## Setup
 ///
-///   [\"" <> name <> "\", \"ws\"] -> " <> name <> "_socket.handle_ws(req)
+/// 1. Add the WebSocket route to router.gleam. Because WebSocket
+///    upgrades bypass Wisp, handle it before the Wisp handler in
+///    your main module:
 ///
-/// The Lustre server component protocol:
-/// 1. Client connects via WebSocket
-/// 2. Server starts a Lustre app, renders initial HTML, sends patch
-/// 3. Client applies patch to DOM
-/// 4. Client sends events (clicks, input) as JSON
-/// 5. Server runs update, diffs view, sends patch
+///    ```gleam
+///    // In src/<app>.gleam, before the wisp_mist.handler:
+///    import " <> app <> "/web/live/" <> name <> "_socket
+///
+///    // In the mist handler, check for WS upgrade:
+///    fn handle(req) {
+///      case request.path_segments(req) {
+///        [\"" <> name <> "\", \"ws\"] -> " <> name <> "_socket.upgrade(req)
+///        _ -> wisp_handler(req)
+///      }
+///    }
+///    ```
+///
+/// 2. Start a Lustre factory supervisor in your main module to
+///    manage server component instances.
 ///
 /// See: https://hexdocs.pm/lustre/lustre/server_component.html
 ///
-import gleam/io
+import gleam/erlang/process
+import gleam/http/request.{type Request}
+import gleam/http/response
+import gleam/json
+import gleam/option.{None}
+import lustre/server_component
+import mist.{type Connection, type ResponseData}
 
-/// Placeholder — implement with Mist WebSocket and Lustre server_component.
-pub fn handle_ws(_req: a) -> Nil {
-  io.println(\"WebSocket handler for " <> name <> " not yet wired.\")
-  io.println(\"See src/" <> app <> "/web/live/" <> name <> "_socket.gleam for instructions.\")
-  Nil
+/// WebSocket connection state.
+pub type State {
+  State
+}
+
+/// Upgrade an HTTP request to a WebSocket for the server component.
+pub fn upgrade(
+  req: Request(Connection),
+) -> response.Response(ResponseData) {
+  mist.websocket(
+    request: req,
+    handler: fn(state, msg, conn) {
+      case msg {
+        mist.Text(text) -> {
+          // Decode event from client and dispatch to server runtime
+          // TODO: wire to your Lustre runtime Subject
+          // case json.parse(text, server_component.runtime_message_decoder()) {
+          //   Ok(runtime_msg) -> process.send(runtime, runtime_msg)
+          //   Error(_) -> Nil
+          // }
+          mist.continue(state)
+        }
+        mist.Binary(_) -> mist.continue(state)
+        mist.Custom(_) -> mist.continue(state)
+        mist.Closed | mist.Shutdown -> mist.stop()
+      }
+    },
+    on_init: fn(_conn) {
+      // TODO: Start a Lustre server component instance here.
+      // Use lustre.supervised() or lustre.factory() to create
+      // a managed runtime, then register a callback to send
+      // patches over the WebSocket:
+      //
+      // server_component.register_callback(fn(msg) {
+      //   let patch = server_component.client_message_to_json(msg)
+      //   mist.send_text_frame(conn, json.to_string(patch))
+      // })
+      #(State, None)
+    },
+    on_close: fn(_state) { Nil },
+  )
 }
 "
 }
@@ -430,29 +483,28 @@ fn live_handler(app: String, name: String) -> String {
   "/// Handler for the " <> name <> " live page.
 ///
 /// Serves the HTML shell that mounts the Lustre server component
-/// over WebSocket.
+/// via the <lustre-server-component> custom element over WebSocket.
 ///
 import " <> app <> "/context.{type Context}
 import " <> app <> "/web/layouts/root_layout
-import lustre/attribute.{id, src}
+import lustre/attribute
 import lustre/element.{text}
-import lustre/element/html.{div, h1, script, section}
+import lustre/element/html.{div, section}
+import lustre/server_component
 import wisp.{type Request, type Response}
 
 pub fn index(_req: Request, _ctx: Context) -> Response {
   section([], [
-    div([id(\"" <> name <> "-live\")], [
-      h1([], [text(\"Loading " <> type_name <> "...\")]),
-    ]),
-    script([], \"
-      // Connect to the server component WebSocket
-      const ws = new WebSocket('ws://' + location.host + '/" <> name <> "/ws');
-      ws.onopen = () => console.log('" <> type_name <> " connected');
-      ws.onmessage = (e) => {
-        // Apply DOM patches from server
-        console.log('Patch:', e.data);
-      };
-    \"),
+    // Inline the Lustre server component client runtime
+    server_component.script(),
+    // Mount the server component, connecting via WebSocket
+    server_component.element(
+      [
+        server_component.route(\"/" <> name <> "/ws\"),
+        server_component.method(server_component.WebSocket),
+      ],
+      [text(\"Loading " <> type_name <> "...\")],
+    ),
   ])
   |> root_layout.wrap(\"" <> type_name <> "\")
   |> wisp.html_response(200)
@@ -464,8 +516,11 @@ fn patch_router_live(app: String, name: String) {
   let router_path = "src/" <> app <> "/router.gleam"
   let assert Ok(content) = simplifile.read(router_path)
 
-  let import_line = "import " <> app <> "/web/" <> name <> "_live_handler"
-  let content = add_import(content, import_line)
+  let handler_import = "import " <> app <> "/web/" <> name <> "_live_handler"
+  let content = add_import(content, handler_import)
+
+  let socket_import = "import " <> app <> "/web/live/" <> name <> "_socket"
+  let content = add_import(content, socket_import)
 
   let routes =
     "\n    [\""
@@ -609,25 +664,59 @@ fn api_resource_handler(
   resource_singular: String,
   type_name: String,
   db: DbChoice,
+  fields: List(#(String, String)),
 ) -> String {
   let db_arg = case db {
     Sqlite -> "ctx.db_path"
     _ -> "ctx.db"
   }
 
-  "import gleam/int
+  // Build JSON object fields for serialization
+  let json_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(name, field_type) = f
+      let json_fn = case field_type {
+        "int" -> "json.int"
+        "float" -> "json.float"
+        "bool" -> "json.bool"
+        _ -> "json.string"
+      }
+      "      #(\"" <> name <> "\", " <> json_fn <> "(item." <> name <> ")),"
+    })
+    |> string.join("\n")
+
+  let to_json =
+    "fn to_json(item: "
+    <> resource_singular
+    <> ".type_placeholder) -> json.Json {
+  json.object([
+    #(\"id\", json.int(item.id)),
+"
+    <> json_fields
+    <> "
+  ])
+}"
+
+  // Fix the type placeholder
+  let to_json = string.replace(to_json, "type_placeholder", type_name)
+
+  let extra_imports = case list.any(fields, fn(f) { f.1 == "float" }) {
+    True -> "\nimport gleam/float"
+    False -> ""
+  }
+
+  "import gleam/int" <> extra_imports <> "
 import gleam/json
 import " <> app_name <> "/context.{type Context}
 import " <> app_name <> "/data/" <> resource_singular <> "_repo
-import " <> app_name <> "/web/error_handler
+import " <> app_name <> "/domain/" <> resource_singular <> "
 import wisp.{type Request, type Response}
 
 pub fn index(_req: Request, ctx: Context) -> Response {
   let items = " <> resource_singular <> "_repo.list(" <> db_arg <> ")
   let body =
-    json.array(items, fn(item) {
-      json.object([#(\"id\", json.int(item.id))])
-    })
+    json.array(items, to_json)
     |> json.to_string
   wisp.json_response(body, 200)
 }
@@ -639,26 +728,21 @@ pub fn show(req: Request, ctx: Context, id: String) -> Response {
       case " <> resource_singular <> "_repo.get(" <> db_arg <> ", id) {
         Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
         Ok(item) -> {
-          let body =
-            json.object([#(\"id\", json.int(item.id))])
-            |> json.to_string
-          wisp.json_response(body, 200)
+          wisp.json_response(json.to_string(to_json(item)), 200)
         }
       }
   }
 }
 
 pub fn create(req: Request, ctx: Context) -> Response {
-  use json_body <- wisp.require_json(req)
-  // Decode JSON body and create resource
-  // TODO: implement JSON decoding for " <> type_name <> "
+  use _json_body <- wisp.require_json(req)
+  // TODO: decode JSON body into " <> type_name <> "Params and create
   wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
 }
 
 pub fn update(req: Request, ctx: Context, id: String) -> Response {
-  use json_body <- wisp.require_json(req)
-  // Decode JSON body and update resource
-  // TODO: implement JSON decoding for " <> type_name <> "
+  use _json_body <- wisp.require_json(req)
+  // TODO: decode JSON body into " <> type_name <> "Params and update
   wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
 }
 
@@ -671,6 +755,8 @@ pub fn delete(req: Request, ctx: Context, id: String) -> Response {
     }
   }
 }
+
+" <> to_json <> "
 "
 }
 
