@@ -38,6 +38,7 @@ packages = [
 
 [requirements]
 argv = { version = ">= 1.0.2 and < 2.0.0" }
+exception = { version = ">= 2.1.0 and < 3.0.0" }
 gleam_erlang = { version = ">= 0.34.0 and < 2.0.0" }
 gleam_http = { version = ">= 4.3.0 and < 5.0.0" }
 gleam_stdlib = { version = ">= 0.44.0 and < 2.0.0" }

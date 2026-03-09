@@ -176,6 +176,7 @@ pub fn router_module(name: String, _db: DbChoice) -> String {
 import " <> name <> "/context.{type Context}
 import " <> name <> "/web/error_handler
 import " <> name <> "/web/home_handler
+import refrakt/dev_error
 import wisp.{type Request, type Response}
 
 pub fn handle_request(req: Request, ctx: Context) -> Response {
@@ -193,7 +194,7 @@ fn middleware(
 ) -> Response {
   let req = wisp.method_override(req)
   use <- wisp.log_request(req)
-  use <- wisp.rescue_crashes
+  use <- dev_error.rescue(req)
   use <- wisp.serve_static(req, under: \"/static\", from: priv_static())
   next(req)
 }
