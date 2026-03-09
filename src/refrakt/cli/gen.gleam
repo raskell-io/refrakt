@@ -1,0 +1,933 @@
+/// Code generators: page, resource, migration, auth.
+///
+import gleam/int
+import gleam/io
+import gleam/list
+import gleam/string
+import refrakt/cli/project
+import refrakt/cli/templates
+import simplifile
+
+// =============================================================================
+// gen page
+// =============================================================================
+
+pub fn page(name: String) {
+  let app = project.app_name()
+
+  let handler_path = "src/" <> app <> "/web/" <> name <> "_handler.gleam"
+  let test_path = "test/" <> app <> "/web/" <> name <> "_handler_test.gleam"
+
+  // Create handler
+  let handler_content = "import " <> app <> "/context.{type Context}
+import " <> app <> "/web/layouts/root_layout
+import lustre/attribute.{class}
+import lustre/element.{text}
+import lustre/element/html.{h1, section}
+import wisp.{type Request, type Response}
+
+pub fn index(_req: Request, _ctx: Context) -> Response {
+  section([class(\"" <> name <> "\")], [
+    h1([], [text(\"" <> capitalize(name) <> "\")]),
+  ])
+  |> root_layout.wrap(\"" <> capitalize(name) <> "\")
+  |> wisp.html_response(200)
+}
+"
+
+  let test_content =
+    "import gleeunit/should
+
+pub fn placeholder_test() {
+  1 + 1
+  |> should.equal(2)
+}
+"
+
+  let assert Ok(_) = simplifile.write(handler_path, handler_content)
+  ensure_dir_for(test_path)
+  let assert Ok(_) = simplifile.write(test_path, test_content)
+
+  // Patch router
+  let _ = patch_router_page(app, name)
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> handler_path)
+  io.println("  " <> test_path)
+  io.println("")
+  io.println("Updated:")
+  io.println("  src/" <> app <> "/router.gleam")
+}
+
+// =============================================================================
+// gen resource
+// =============================================================================
+
+pub fn resource(name: String, raw_fields: List(String)) {
+  let app = project.app_name()
+  let singular = singularize(name)
+  let type_name = capitalize(singular)
+  let fields = parse_fields(raw_fields)
+
+  // Paths
+  let handler_path = "src/" <> app <> "/web/" <> singular <> "_handler.gleam"
+  let views_path = "src/" <> app <> "/web/" <> singular <> "_views.gleam"
+  let form_path = "src/" <> app <> "/web/forms/" <> singular <> "_form.gleam"
+  let domain_path = "src/" <> app <> "/domain/" <> singular <> ".gleam"
+  let repo_path = "src/" <> app <> "/data/" <> singular <> "_repo.gleam"
+  let migration_path =
+    "src/"
+    <> app
+    <> "/data/migrations/"
+    <> next_migration_number(app)
+    <> "_create_"
+    <> name
+    <> ".sql"
+  let test_path = "test/" <> app <> "/web/" <> singular <> "_handler_test.gleam"
+
+  // Ensure directories
+  list.each(
+    [
+      "src/" <> app <> "/web/forms",
+      "src/" <> app <> "/domain",
+      "src/" <> app <> "/data",
+      "src/" <> app <> "/data/migrations",
+      "test/" <> app <> "/web",
+    ],
+    fn(dir) {
+      let _ = simplifile.create_directory_all(dir)
+    },
+  )
+
+  // Generate files
+  let gleam_fields =
+    list.map(fields, fn(f) {
+      let #(field_name, field_type) = f
+      #(field_name, to_gleam_type(field_type))
+    })
+
+  let assert Ok(_) =
+    simplifile.write(
+      handler_path,
+      templates.resource_handler(app, name, singular, type_name),
+    )
+
+  let assert Ok(_) =
+    simplifile.write(
+      views_path,
+      resource_views(app, name, singular, type_name, fields),
+    )
+
+  let assert Ok(_) =
+    simplifile.write(form_path, resource_form(app, singular, type_name, fields))
+
+  let assert Ok(_) =
+    simplifile.write(
+      domain_path,
+      templates.resource_domain_type(type_name, gleam_fields),
+    )
+
+  let assert Ok(_) =
+    simplifile.write(repo_path, resource_repo(app, singular, type_name, fields))
+
+  let assert Ok(_) =
+    simplifile.write(migration_path, resource_migration(name, fields))
+
+  let assert Ok(_) = simplifile.write(test_path, resource_test(app, singular))
+
+  // Patch router
+  let _ = patch_router_resource(app, name, singular)
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> handler_path)
+  io.println("  " <> views_path)
+  io.println("  " <> form_path)
+  io.println("  " <> domain_path)
+  io.println("  " <> repo_path)
+  io.println("  " <> migration_path)
+  io.println("  " <> test_path)
+  io.println("")
+  io.println("Updated:")
+  io.println("  src/" <> app <> "/router.gleam")
+}
+
+// =============================================================================
+// gen migration
+// =============================================================================
+
+pub fn migration(name: String) {
+  let app = project.app_name()
+  let dir = "src/" <> app <> "/data/migrations"
+  let _ = simplifile.create_directory_all(dir)
+
+  let number = next_migration_number(app)
+  let filename = number <> "_" <> name <> ".sql"
+  let path = dir <> "/" <> filename
+
+  let content = "-- Migration: " <> name <> "\n-- Created: " <> number <> "\n\n"
+
+  let assert Ok(_) = simplifile.write(path, content)
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> path)
+}
+
+// =============================================================================
+// gen auth
+// =============================================================================
+
+pub fn auth() {
+  io.println("gen auth is not yet implemented. Coming soon.")
+}
+
+// =============================================================================
+// Resource template helpers
+// =============================================================================
+
+fn resource_views(
+  app_name: String,
+  resource_plural: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let first_field = case fields {
+    [#(name, _), ..] -> name
+    [] -> "id"
+  }
+
+  "import gleam/int
+import gleam/list
+import lustre/attribute.{class, href}
+import lustre/element.{type Element, text}
+import lustre/element/html.{a, div, h1, li, p, section, ul}
+import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
+import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
+
+pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
+  section([class(\"" <> resource_plural <> "\")], [
+    div([class(\"header\")], [
+      h1([], [text(\"" <> type_name <> "s\")]),
+      a([href(\"/" <> resource_plural <> "/new\"), class(\"btn\")], [text(\"New " <> type_name <> "\")]),
+    ]),
+    ul(
+      [class(\"post-list\")],
+      list.map(items, fn(item) {
+        li([], [
+          a([href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id))], [
+            text(item." <> first_field <> "),
+          ]),
+        ])
+      }),
+    ),
+  ])
+}
+
+pub fn show_view(item: " <> type_name <> ") -> Element(Nil) {
+  section([class(\"" <> resource_singular <> "\")], [
+    h1([], [text(item." <> first_field <> ")]),
+    div([class(\"actions\")], [
+      a(
+        [
+          href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id) <> \"/edit\"),
+          class(\"btn\"),
+        ],
+        [text(\"Edit\")],
+      ),
+    ]),
+  ])
+}
+
+pub fn form_view(
+  values: " <> resource_singular <> "_form." <> type_name <> "Form,
+  errors: List(#(String, String)),
+) -> Element(Nil) {
+  section([class(\"" <> resource_singular <> "-form\")], [
+    h1([], [text(\"Form\")]),
+    p([], [text(\"Form fields go here\")]),
+  ])
+}
+
+fn field_error(
+  errors: List(#(String, String)),
+  field: String,
+) -> Element(Nil) {
+  case list.find(errors, fn(e) { e.0 == field }) {
+    Ok(#(_, message)) -> p([class(\"error\")], [text(message)])
+    Error(_) -> text(\"\")
+  }
+}
+"
+}
+
+fn resource_form(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let form_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(field_name, field_type) = f
+      "    " <> field_name <> ": " <> form_default_value(field_type) <> ","
+    })
+    |> string.join("\n")
+
+  let form_field_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(name, ft) = f
+      "    " <> name <> ": " <> to_gleam_type(ft) <> ","
+    })
+    |> string.join("\n")
+
+  let params_field_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(name, ft) = f
+      "    " <> name <> ": " <> to_gleam_type(ft) <> ","
+    })
+    |> string.join("\n")
+
+  let from_form_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(field_name, field_type) = f
+      case field_type {
+        "bool" ->
+          "    "
+          <> field_name
+          <> ": list.any(data.values, fn(v) { v.0 == \""
+          <> field_name
+          <> "\" }),"
+        _ ->
+          "    " <> field_name <> ": get_value(data, \"" <> field_name <> "\"),"
+      }
+    })
+    |> string.join("\n")
+
+  let from_record_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(name, _) = f
+      "    " <> name <> ": item." <> name <> ","
+    })
+    |> string.join("\n")
+
+  let decode_lets =
+    fields
+    |> list.filter(fn(f) { f.1 != "bool" })
+    |> list.map(fn(f) {
+      let #(name, _) = f
+      "  let " <> name <> " = get_value(data, \"" <> name <> "\")"
+    })
+    |> string.join("\n")
+
+  let validation_lines =
+    fields
+    |> list.filter(fn(f) {
+      let #(_, t) = f
+      t == "string" || t == "text"
+    })
+    |> list.map(fn(f) {
+      let #(name, _) = f
+      "    |> validate.required("
+      <> name
+      <> ", \""
+      <> name
+      <> "\", \""
+      <> capitalize(name)
+      <> " is required\")"
+    })
+    |> string.join("\n")
+
+  let params_construction =
+    fields
+    |> list.map(fn(f) {
+      let #(name, t) = f
+      case t {
+        "bool" ->
+          "        "
+          <> name
+          <> ": list.any(data.values, fn(v) { v.0 == \""
+          <> name
+          <> "\" }),"
+        "int" ->
+          "        " <> name <> ": result.unwrap(int.parse(" <> name <> "), 0),"
+        "float" ->
+          "        "
+          <> name
+          <> ": result.unwrap(float.parse("
+          <> name
+          <> "), 0.0),"
+        _ -> "        " <> name <> ": " <> name <> ","
+      }
+    })
+    |> string.join("\n")
+
+  let extra_imports = case
+    list.any(fields, fn(f) { f.1 == "int" }),
+    list.any(fields, fn(f) { f.1 == "float" })
+  {
+    True, True -> "\nimport gleam/int\nimport gleam/float"
+    True, False -> "\nimport gleam/int"
+    False, True -> "\nimport gleam/float"
+    False, False -> ""
+  }
+
+  "import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result" <> extra_imports <> "
+import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
+import refrakt/validate
+import wisp
+
+pub type " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: Option(Int),
+" <> form_field_defs <> "
+  )
+}
+
+pub type " <> type_name <> "Params {
+  " <> type_name <> "Params(
+" <> params_field_defs <> "
+  )
+}
+
+pub fn empty() -> " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: None,
+" <> form_fields <> "
+  )
+}
+
+pub fn from_" <> resource_singular <> "(item: " <> type_name <> ") -> " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: Some(item.id),
+" <> from_record_fields <> "
+  )
+}
+
+pub fn from_form_data(data: wisp.FormData) -> " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: None,
+" <> from_form_fields <> "
+  )
+}
+
+pub fn decode(
+  data: wisp.FormData,
+) -> Result(" <> type_name <> "Params, List(#(String, String))) {
+" <> decode_lets <> "
+
+  let errors =
+    []
+" <> validation_lines <> "
+
+  case errors {
+    [] ->
+      Ok(" <> type_name <> "Params(
+" <> params_construction <> "
+      ))
+    _ -> Error(errors)
+  }
+}
+
+fn get_value(data: wisp.FormData, key: String) -> String {
+  list.find(data.values, fn(v) { v.0 == key })
+  |> result.map(fn(v) { v.1 })
+  |> result.unwrap(\"\")
+}
+"
+}
+
+fn resource_repo(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let field_names =
+    fields
+    |> list.map(fn(f) { f.0 })
+    |> string.join(", ")
+
+  let select_fields = "id, " <> field_names
+
+  let decoder_fields =
+    fields
+    |> list.index_map(fn(f, i) {
+      let #(name, field_type) = f
+      let decode_fn = case field_type {
+        "bool" -> "decode.bool"
+        "int" -> "decode.int"
+        "float" -> "decode.float"
+        _ -> "decode.string"
+      }
+      "  use "
+      <> name
+      <> " <- decode.field("
+      <> int.to_string(i + 1)
+      <> ", "
+      <> decode_fn
+      <> ")"
+    })
+    |> string.join("\n")
+
+  let constructor_args =
+    fields
+    |> list.map(fn(f) { f.0 <> ": " <> f.0 })
+    |> string.join(", ")
+
+  let insert_placeholders =
+    fields
+    |> list.index_map(fn(_, i) { "$" <> int.to_string(i + 1) })
+    |> string.join(", ")
+
+  let insert_params =
+    fields
+    |> list.map(fn(f) {
+      let #(name, field_type) = f
+      let pog_fn = case field_type {
+        "bool" -> "pog.bool"
+        "int" -> "pog.int"
+        "float" -> "pog.float"
+        _ -> "pog.text"
+      }
+      "  |> pog.parameter(" <> pog_fn <> "(params." <> name <> "))"
+    })
+    |> string.join("\n")
+
+  let update_sets =
+    fields
+    |> list.index_map(fn(f, i) { f.0 <> " = $" <> int.to_string(i + 1) })
+    |> string.join(", ")
+
+  let update_id_param = "$" <> int.to_string(list.length(fields) + 1)
+
+  let q = "\""
+  let table = resource_singular <> "s"
+
+  let list_query =
+    "  pog.query("
+    <> q
+    <> "SELECT "
+    <> select_fields
+    <> " FROM "
+    <> table
+    <> " ORDER BY id DESC"
+    <> q
+    <> ")"
+
+  let get_query =
+    "  pog.query("
+    <> q
+    <> "SELECT "
+    <> select_fields
+    <> " FROM "
+    <> table
+    <> " WHERE id = $1"
+    <> q
+    <> ")"
+
+  let create_query =
+    "  pog.query("
+    <> q
+    <> "INSERT INTO "
+    <> table
+    <> " ("
+    <> field_names
+    <> ") VALUES ("
+    <> insert_placeholders
+    <> ") RETURNING "
+    <> select_fields
+    <> q
+    <> ")"
+
+  let update_query =
+    "  pog.query("
+    <> q
+    <> "UPDATE "
+    <> table
+    <> " SET "
+    <> update_sets
+    <> " WHERE id = "
+    <> update_id_param
+    <> " RETURNING "
+    <> select_fields
+    <> q
+    <> ")"
+
+  let delete_query =
+    "  pog.query("
+    <> q
+    <> "DELETE FROM "
+    <> table
+    <> " WHERE id = $1"
+    <> q
+    <> ")"
+
+  let single_row_extract =
+    "  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [item] -> Ok(item)
+      _ -> Error(Nil)
+    }
+  })"
+
+  string.join(
+    [
+      "import gleam/dynamic/decode",
+      "import gleam/result",
+      "import "
+        <> app_name
+        <> "/domain/"
+        <> resource_singular
+        <> ".{type "
+        <> type_name
+        <> ", "
+        <> type_name
+        <> "}",
+      "import "
+        <> app_name
+        <> "/web/forms/"
+        <> resource_singular
+        <> "_form.{type "
+        <> type_name
+        <> "Params}",
+      "import pog",
+      "",
+      "fn "
+        <> resource_singular
+        <> "_decoder() -> decode.Decoder("
+        <> type_name
+        <> ") {",
+      "  use id <- decode.field(0, decode.int)",
+      decoder_fields,
+      "  decode.success("
+        <> type_name
+        <> "(id: id, "
+        <> constructor_args
+        <> "))",
+      "}",
+      "",
+      "pub fn list(db: pog.Connection) -> List(" <> type_name <> ") {",
+      list_query,
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      "  |> pog.execute(db)",
+      "  |> result.map(fn(r) { r.rows })",
+      "  |> result.unwrap([])",
+      "}",
+      "",
+      "pub fn get(db: pog.Connection, id: Int) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      get_query,
+      "  |> pog.parameter(pog.int(id))",
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      single_row_extract,
+      "}",
+      "",
+      "pub fn create(db: pog.Connection, params: "
+        <> type_name
+        <> "Params) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      create_query,
+      insert_params,
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      single_row_extract,
+      "}",
+      "",
+      "pub fn update(",
+      "  db: pog.Connection,",
+      "  id: Int,",
+      "  params: " <> type_name <> "Params,",
+      ") -> Result(" <> type_name <> ", Nil) {",
+      update_query,
+      insert_params,
+      "  |> pog.parameter(pog.int(id))",
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      single_row_extract,
+      "}",
+      "",
+      "pub fn delete(db: pog.Connection, id: Int) -> Result(Nil, Nil) {",
+      delete_query,
+      "  |> pog.parameter(pog.int(id))",
+      "  |> pog.execute(db)",
+      "  |> result.replace(Nil)",
+      "  |> result.replace_error(Nil)",
+      "}",
+      "",
+    ],
+    "\n",
+  )
+}
+
+fn resource_migration(name: String, fields: List(#(String, String))) -> String {
+  let column_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(field_name, field_type) = f
+      "  " <> field_name <> " " <> to_sql_type(field_type) <> " NOT NULL"
+    })
+    |> string.join(",\n")
+
+  "CREATE TABLE " <> singularize(name) <> "s (
+  id SERIAL PRIMARY KEY,
+" <> column_defs <> ",
+  inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"
+}
+
+fn resource_test(app_name: String, resource_singular: String) -> String {
+  "import gleeunit/should
+import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
+
+pub fn empty_form_test() {
+  let form = " <> resource_singular <> "_form.empty()
+  form.id
+  |> should.be_none
+}
+"
+}
+
+// =============================================================================
+// Router patching
+// =============================================================================
+
+fn patch_router_page(app: String, name: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  // Add import
+  let import_line = "import " <> app <> "/web/" <> name <> "_handler"
+  let content = add_import(content, import_line)
+
+  // Add route before catch-all
+  let route_line =
+    "    [\""
+    <> name
+    <> "\"], http.Get -> "
+    <> name
+    <> "_handler.index(req, ctx)"
+
+  let content = add_route(content, route_line)
+
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+fn patch_router_resource(app: String, plural: String, singular: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  // Add import
+  let import_line = "import " <> app <> "/web/" <> singular <> "_handler"
+  let content = add_import(content, import_line)
+
+  // Add routes before catch-all
+  let routes =
+    "\n    [\""
+    <> plural
+    <> "\"], http.Get -> "
+    <> singular
+    <> "_handler.index(req, ctx)
+    [\""
+    <> plural
+    <> "\", \"new\"], http.Get -> "
+    <> singular
+    <> "_handler.new(req, ctx)
+    [\""
+    <> plural
+    <> "\"], http.Post -> "
+    <> singular
+    <> "_handler.create(req, ctx)
+    [\""
+    <> plural
+    <> "\", id], http.Get -> "
+    <> singular
+    <> "_handler.show(req, ctx, id)
+    [\""
+    <> plural
+    <> "\", id, \"edit\"], http.Get -> "
+    <> singular
+    <> "_handler.edit(req, ctx, id)
+    [\""
+    <> plural
+    <> "\", id], http.Put -> "
+    <> singular
+    <> "_handler.update(req, ctx, id)
+    [\""
+    <> plural
+    <> "\", id], http.Delete -> "
+    <> singular
+    <> "_handler.delete(req, ctx, id)"
+
+  let content = add_route(content, routes)
+
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+fn add_import(content: String, import_line: String) -> String {
+  // Check if import already exists
+  case string.contains(content, import_line) {
+    True -> content
+    False -> {
+      // Find last import line and add after it
+      let lines = string.split(content, "\n")
+      let #(before, after) = split_after_imports(lines, [])
+      string.join(list.append(before, [import_line, ..after]), "\n")
+    }
+  }
+}
+
+fn split_after_imports(
+  lines: List(String),
+  acc: List(String),
+) -> #(List(String), List(String)) {
+  case lines {
+    [] -> #(list.reverse(acc), [])
+    [line, ..rest] ->
+      case string.starts_with(line, "import ") {
+        True -> split_after_imports(rest, [line, ..acc])
+        False ->
+          case acc {
+            [] -> split_after_imports(rest, [line, ..acc])
+            _ -> #(list.reverse(acc), [line, ..rest])
+          }
+      }
+  }
+}
+
+fn add_route(content: String, route_line: String) -> String {
+  // Insert before the catch-all `_, _ ->` pattern
+  case string.split_once(content, "    _, _ ->") {
+    Ok(#(before, after)) -> before <> route_line <> "\n    _, _ ->" <> after
+    Error(_) ->
+      // Fallback: try `_ ->` pattern
+      case string.split_once(content, "    _ ->") {
+        Ok(#(before, after)) -> before <> route_line <> "\n    _ ->" <> after
+        Error(_) -> content
+      }
+  }
+}
+
+// =============================================================================
+// Field parsing and type conversion
+// =============================================================================
+
+pub fn parse_fields(raw: List(String)) -> List(#(String, String)) {
+  raw
+  |> list.filter_map(fn(field) {
+    case string.split(field, ":") {
+      [name, field_type] -> Ok(#(name, field_type))
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn to_gleam_type(field_type: String) -> String {
+  case field_type {
+    "string" -> "String"
+    "text" -> "String"
+    "int" -> "Int"
+    "float" -> "Float"
+    "bool" -> "Bool"
+    "date" -> "String"
+    "datetime" -> "String"
+    _ -> "String"
+  }
+}
+
+pub fn to_sql_type(field_type: String) -> String {
+  case field_type {
+    "string" -> "TEXT"
+    "text" -> "TEXT"
+    "int" -> "INTEGER"
+    "float" -> "DOUBLE PRECISION"
+    "bool" -> "BOOLEAN"
+    "date" -> "DATE"
+    "datetime" -> "TIMESTAMPTZ"
+    _ -> "TEXT"
+  }
+}
+
+fn form_default_value(field_type: String) -> String {
+  case field_type {
+    "bool" -> "False"
+    "int" -> "0"
+    "float" -> "0.0"
+    _ -> "\"\""
+  }
+}
+
+// =============================================================================
+// String helpers
+// =============================================================================
+
+fn capitalize(s: String) -> String {
+  case string.pop_grapheme(s) {
+    Ok(#(first, rest)) -> string.uppercase(first) <> rest
+    Error(_) -> s
+  }
+}
+
+fn singularize(s: String) -> String {
+  // Simple singularization: drop trailing 's'
+  // Handles: posts -> post, users -> user, categories -> categorie (good enough for MVP)
+  case string.ends_with(s, "ies") {
+    True -> string.drop_end(s, 3) <> "y"
+    False ->
+      case string.ends_with(s, "ses") {
+        True -> string.drop_end(s, 2)
+        False ->
+          case string.ends_with(s, "s") {
+            True -> string.drop_end(s, 1)
+            False -> s
+          }
+      }
+  }
+}
+
+fn next_migration_number(app: String) -> String {
+  let dir = "src/" <> app <> "/data/migrations"
+  case simplifile.read_directory(dir) {
+    Ok(files) -> {
+      let count = list.length(files) + 1
+      pad_number(count, 3)
+    }
+    Error(_) -> "001"
+  }
+}
+
+fn pad_number(n: Int, width: Int) -> String {
+  let s = int.to_string(n)
+  let padding = width - string.length(s)
+  case padding > 0 {
+    True -> string.repeat("0", padding) <> s
+    False -> s
+  }
+}
+
+fn ensure_dir_for(path: String) {
+  case string.split(path, "/") {
+    [] -> Nil
+    parts -> {
+      let dir =
+        parts
+        |> list.take(list.length(parts) - 1)
+        |> string.join("/")
+      let _ = simplifile.create_directory_all(dir)
+      Nil
+    }
+  }
+}
