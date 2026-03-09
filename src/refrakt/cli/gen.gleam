@@ -180,7 +180,59 @@ pub fn migration(name: String) {
 // =============================================================================
 
 pub fn auth() {
-  io.println("gen auth is not yet implemented. Coming soon.")
+  let app = project.app_name()
+
+  // Ensure directories
+  list.each(
+    [
+      "src/" <> app <> "/web/forms",
+      "src/" <> app <> "/web/middleware",
+      "src/" <> app <> "/domain",
+      "src/" <> app <> "/data",
+      "src/" <> app <> "/data/migrations",
+      "test/" <> app <> "/web",
+    ],
+    fn(dir) {
+      let _ = simplifile.create_directory_all(dir)
+    },
+  )
+
+  let files = [
+    #("src/" <> app <> "/domain/user.gleam", auth_user_type()),
+    #("src/" <> app <> "/domain/auth.gleam", auth_domain(app)),
+    #("src/" <> app <> "/data/user_repo.gleam", auth_user_repo(app)),
+    #(
+      "src/"
+        <> app
+        <> "/data/migrations/"
+        <> next_migration_number(app)
+        <> "_create_users.sql",
+      auth_migration(),
+    ),
+    #("src/" <> app <> "/web/forms/auth_form.gleam", auth_form(app)),
+    #("src/" <> app <> "/web/auth_handler.gleam", auth_handler(app)),
+    #("src/" <> app <> "/web/auth_views.gleam", auth_views(app)),
+    #("src/" <> app <> "/web/middleware/auth.gleam", auth_middleware(app)),
+    #("test/" <> app <> "/web/auth_handler_test.gleam", auth_test(app)),
+  ]
+
+  list.each(files, fn(file) {
+    let #(path, content) = file
+    let assert Ok(_) = simplifile.write(path, content)
+  })
+
+  // Patch router
+  let _ = patch_router_auth(app)
+
+  io.println("")
+  io.println("Created:")
+  list.each(files, fn(file) { io.println("  " <> file.0) })
+  io.println("")
+  io.println("Updated:")
+  io.println("  src/" <> app <> "/router.gleam")
+  io.println("")
+  io.println("Note: You need a password hashing library. Add one with:")
+  io.println("  gleam add beecrypt")
 }
 
 // =============================================================================
@@ -199,11 +251,40 @@ fn resource_views(
     [] -> "id"
   }
 
+  let form_field_elements =
+    fields
+    |> list.map(fn(f) {
+      let #(fname, ftype) = f
+      let label_text = capitalize(fname)
+      case ftype {
+        "bool" -> "      div([class(\"field\")], [
+        label([], [
+          input([type_(\"checkbox\"), name(\"" <> fname <> "\"), attribute.checked(values." <> fname <> ")]),
+          text(\" " <> label_text <> "\"),
+        ]),
+      ]),"
+        "text" -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        textarea([name(\"" <> fname <> "\")], values." <> fname <> "),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+        _ -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        input([type_(\"text\"), name(\"" <> fname <> "\"), value(values." <> fname <> ")]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+      }
+    })
+    |> string.join("\n")
+
   "import gleam/int
 import gleam/list
-import lustre/attribute.{class, href}
+import gleam/option
+import lustre/attribute.{class, href, name, type_, value}
 import lustre/element.{type Element, text}
-import lustre/element/html.{a, div, h1, li, p, section, ul}
+import lustre/element/html.{
+  a, button, div, form, h1, input, label, li, p, section, textarea, ul,
+}
 import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
 
@@ -245,9 +326,24 @@ pub fn form_view(
   values: " <> resource_singular <> "_form." <> type_name <> "Form,
   errors: List(#(String, String)),
 ) -> Element(Nil) {
+  let post_action = case values.id {
+    option.Some(id) -> \"/" <> resource_plural <> "/\" <> int.to_string(id)
+    option.None -> \"/" <> resource_plural <> "\"
+  }
+
   section([class(\"" <> resource_singular <> "-form\")], [
-    h1([], [text(\"Form\")]),
-    p([], [text(\"Form fields go here\")]),
+    h1([], [text(case values.id {
+      option.Some(_) -> \"Edit " <> type_name <> "\"
+      option.None -> \"New " <> type_name <> "\"
+    })]),
+    form([attribute.action(post_action), attribute.method(\"post\")], [
+      case values.id {
+        option.Some(_) -> input([type_(\"hidden\"), name(\"_method\"), value(\"put\")])
+        option.None -> text(\"\")
+      },
+" <> form_field_elements <> "
+      button([type_(\"submit\"), class(\"btn\")], [text(\"Save\")]),
+    ]),
   ])
 }
 
@@ -868,6 +964,433 @@ fn form_default_value(field_type: String) -> String {
     "float" -> "0.0"
     _ -> "\"\""
   }
+}
+
+// =============================================================================
+// Auth generator templates
+// =============================================================================
+
+fn auth_user_type() -> String {
+  "pub type User {
+  User(id: Int, email: String, hashed_password: String)
+}
+"
+}
+
+fn auth_domain(_app: String) -> String {
+  "import gleam/crypto
+import gleam/bit_array
+import gleam/string
+
+/// Hash a password using a simple HMAC-based approach.
+/// Replace with a proper bcrypt/argon2 library for production.
+pub fn hash_password(password: String) -> String {
+  crypto.hash(crypto.Sha256, bit_array.from_string(password))
+  |> bit_array.base16_encode
+  |> string.lowercase
+}
+
+/// Verify a password against a hash.
+pub fn verify_password(password: String, hash: String) -> Bool {
+  hash_password(password) == hash
+}
+"
+}
+
+fn auth_user_repo(app: String) -> String {
+  let q = "\""
+  "import gleam/dynamic/decode
+import gleam/result
+import " <> app <> "/domain/user.{type User, User}
+import pog
+
+fn user_decoder() -> decode.Decoder(User) {
+  use id <- decode.field(0, decode.int)
+  use email <- decode.field(1, decode.string)
+  use hashed_password <- decode.field(2, decode.string)
+  decode.success(User(id: id, email: email, hashed_password: hashed_password))
+}
+
+pub fn get_by_email(db: pog.Connection, email: String) -> Result(User, Nil) {
+  pog.query(" <> q <> "SELECT id, email, hashed_password FROM users WHERE email = $1" <> q <> ")
+  |> pog.parameter(pog.text(email))
+  |> pog.returning(user_decoder())
+  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn get_by_id(db: pog.Connection, id: Int) -> Result(User, Nil) {
+  pog.query(" <> q <> "SELECT id, email, hashed_password FROM users WHERE id = $1" <> q <> ")
+  |> pog.parameter(pog.int(id))
+  |> pog.returning(user_decoder())
+  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn create(
+  db: pog.Connection,
+  email: String,
+  hashed_password: String,
+) -> Result(User, Nil) {
+  pog.query(
+    " <> q <> "INSERT INTO users (email, hashed_password) VALUES ($1, $2) RETURNING id, email, hashed_password" <> q <> ",
+  )
+  |> pog.parameter(pog.text(email))
+  |> pog.parameter(pog.text(hashed_password))
+  |> pog.returning(user_decoder())
+  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+"
+}
+
+fn auth_migration() -> String {
+  "CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  hashed_password TEXT NOT NULL,
+  inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX users_email_index ON users (email);
+"
+}
+
+fn auth_form(_app: String) -> String {
+  "import gleam/list
+import gleam/result
+import refrakt/validate
+import wisp
+
+pub type LoginParams {
+  LoginParams(email: String, password: String)
+}
+
+pub type RegisterParams {
+  RegisterParams(email: String, password: String, password_confirmation: String)
+}
+
+pub fn decode_login(
+  data: wisp.FormData,
+) -> Result(LoginParams, List(#(String, String))) {
+  let email = get_value(data, \"email\")
+  let password = get_value(data, \"password\")
+
+  let errors =
+    []
+    |> validate.required(email, \"email\", \"Email is required\")
+    |> validate.required(password, \"password\", \"Password is required\")
+
+  case errors {
+    [] -> Ok(LoginParams(email: email, password: password))
+    _ -> Error(errors)
+  }
+}
+
+pub fn decode_register(
+  data: wisp.FormData,
+) -> Result(RegisterParams, List(#(String, String))) {
+  let email = get_value(data, \"email\")
+  let password = get_value(data, \"password\")
+  let password_confirmation = get_value(data, \"password_confirmation\")
+
+  let errors =
+    []
+    |> validate.required(email, \"email\", \"Email is required\")
+    |> validate.required(password, \"password\", \"Password is required\")
+    |> validate.min_length(password, \"password\", 8, \"Password must be at least 8 characters\")
+    |> check_confirmation(password, password_confirmation)
+
+  case errors {
+    [] ->
+      Ok(RegisterParams(
+        email: email,
+        password: password,
+        password_confirmation: password_confirmation,
+      ))
+    _ -> Error(errors)
+  }
+}
+
+fn check_confirmation(
+  errors: List(#(String, String)),
+  password: String,
+  confirmation: String,
+) -> List(#(String, String)) {
+  case password == confirmation {
+    True -> errors
+    False -> [#(\"password_confirmation\", \"Passwords do not match\"), ..errors]
+  }
+}
+
+fn get_value(data: wisp.FormData, key: String) -> String {
+  list.find(data.values, fn(v) { v.0 == key })
+  |> result.map(fn(v) { v.1 })
+  |> result.unwrap(\"\")
+}
+"
+}
+
+fn auth_handler(app: String) -> String {
+  "import gleam/int
+import " <> app <> "/context.{type Context}
+import " <> app <> "/data/user_repo
+import " <> app <> "/domain/auth
+import " <> app <> "/web/auth_views
+import " <> app <> "/web/error_handler
+import " <> app <> "/web/forms/auth_form
+import " <> app <> "/web/layouts/root_layout
+import refrakt/flash
+import wisp.{type Request, type Response}
+
+pub fn login_page(_req: Request, _ctx: Context) -> Response {
+  auth_views.login_view(\"\", [])
+  |> root_layout.wrap(\"Log In\")
+  |> wisp.html_response(200)
+}
+
+pub fn login(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+
+  case auth_form.decode_login(form_data) {
+    Error(errors) ->
+      auth_views.login_view(\"\", errors)
+      |> root_layout.wrap(\"Log In\")
+      |> wisp.html_response(422)
+
+    Ok(params) ->
+      case user_repo.get_by_email(ctx.db, params.email) {
+        Error(_) ->
+          auth_views.login_view(params.email, [#(\"email\", \"Invalid email or password\")])
+          |> root_layout.wrap(\"Log In\")
+          |> wisp.html_response(422)
+
+        Ok(user) ->
+          case auth.verify_password(params.password, user.hashed_password) {
+            False ->
+              auth_views.login_view(params.email, [#(\"email\", \"Invalid email or password\")])
+              |> root_layout.wrap(\"Log In\")
+              |> wisp.html_response(422)
+
+            True ->
+              wisp.redirect(\"/\")
+              |> wisp.set_cookie(
+                req,
+                \"_user_id\",
+                int.to_string(user.id),
+                wisp.Signed,
+                60 * 60 * 24 * 7,
+              )
+              |> flash.set_flash(req, \"info\", \"Logged in\")
+          }
+      }
+  }
+}
+
+pub fn register_page(_req: Request, _ctx: Context) -> Response {
+  auth_views.register_view(\"\", [])
+  |> root_layout.wrap(\"Register\")
+  |> wisp.html_response(200)
+}
+
+pub fn register(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+
+  case auth_form.decode_register(form_data) {
+    Error(errors) ->
+      auth_views.register_view(\"\", errors)
+      |> root_layout.wrap(\"Register\")
+      |> wisp.html_response(422)
+
+    Ok(params) -> {
+      let hashed = auth.hash_password(params.password)
+      case user_repo.create(ctx.db, params.email, hashed) {
+        Ok(user) ->
+          wisp.redirect(\"/\")
+          |> wisp.set_cookie(
+            req,
+            \"_user_id\",
+            int.to_string(user.id),
+            wisp.Signed,
+            60 * 60 * 24 * 7,
+          )
+          |> flash.set_flash(req, \"info\", \"Account created\")
+
+        Error(_) ->
+          auth_views.register_view(params.email, [#(\"email\", \"Could not create account\")])
+          |> root_layout.wrap(\"Register\")
+          |> wisp.html_response(422)
+      }
+    }
+  }
+}
+
+pub fn logout(req: Request, _ctx: Context) -> Response {
+  wisp.redirect(\"/\")
+  |> wisp.set_cookie(req, \"_user_id\", \"\", wisp.Signed, 0)
+  |> flash.set_flash(req, \"info\", \"Logged out\")
+}
+"
+}
+
+fn auth_views(_app: String) -> String {
+  "import gleam/list
+import lustre/attribute.{class, href, name, type_, value}
+import lustre/element.{type Element, text}
+import lustre/element/html.{
+  a, button, div, form, h1, input, label, p, section,
+}
+
+pub fn login_view(email: String, errors: List(#(String, String))) -> Element(Nil) {
+  section([class(\"auth-form\")], [
+    h1([], [text(\"Log In\")]),
+    form([attribute.action(\"/login\"), attribute.method(\"post\")], [
+      div([class(\"field\")], [
+        label([], [text(\"Email\")]),
+        input([type_(\"email\"), name(\"email\"), value(email)]),
+        field_error(errors, \"email\"),
+      ]),
+      div([class(\"field\")], [
+        label([], [text(\"Password\")]),
+        input([type_(\"password\"), name(\"password\")]),
+        field_error(errors, \"password\"),
+      ]),
+      button([type_(\"submit\"), class(\"btn\")], [text(\"Log In\")]),
+    ]),
+    p([], [
+      text(\"Don't have an account? \"),
+      a([href(\"/register\")], [text(\"Register\")]),
+    ]),
+  ])
+}
+
+pub fn register_view(
+  email: String,
+  errors: List(#(String, String)),
+) -> Element(Nil) {
+  section([class(\"auth-form\")], [
+    h1([], [text(\"Register\")]),
+    form([attribute.action(\"/register\"), attribute.method(\"post\")], [
+      div([class(\"field\")], [
+        label([], [text(\"Email\")]),
+        input([type_(\"email\"), name(\"email\"), value(email)]),
+        field_error(errors, \"email\"),
+      ]),
+      div([class(\"field\")], [
+        label([], [text(\"Password\")]),
+        input([type_(\"password\"), name(\"password\")]),
+        field_error(errors, \"password\"),
+      ]),
+      div([class(\"field\")], [
+        label([], [text(\"Confirm Password\")]),
+        input([type_(\"password\"), name(\"password_confirmation\")]),
+        field_error(errors, \"password_confirmation\"),
+      ]),
+      button([type_(\"submit\"), class(\"btn\")], [text(\"Register\")]),
+    ]),
+    p([], [
+      text(\"Already have an account? \"),
+      a([href(\"/login\")], [text(\"Log In\")]),
+    ]),
+  ])
+}
+
+fn field_error(errors: List(#(String, String)), field: String) -> Element(Nil) {
+  case list.find(errors, fn(e) { e.0 == field }) {
+    Ok(#(_, message)) -> p([class(\"error\")], [text(message)])
+    Error(_) -> text(\"\")
+  }
+}
+"
+}
+
+fn auth_middleware(app: String) -> String {
+  "import gleam/int
+import gleam/result
+import " <> app <> "/context.{type Context}
+import " <> app <> "/data/user_repo
+import " <> app <> "/domain/user.{type User}
+import wisp.{type Request, type Response}
+
+/// Extract the current user from the session cookie.
+pub fn get_current_user(req: Request, ctx: Context) -> Result(User, Nil) {
+  use user_id_str <- result.try(wisp.get_cookie(req, \"_user_id\", wisp.Signed))
+  use user_id <- result.try(
+    int.parse(user_id_str)
+    |> result.replace_error(Nil),
+  )
+  user_repo.get_by_id(ctx.db, user_id)
+}
+
+/// Middleware that requires authentication.
+/// Redirects to /login if no valid session.
+pub fn require_auth(
+  req: Request,
+  ctx: Context,
+  next: fn(User) -> Response,
+) -> Response {
+  case get_current_user(req, ctx) {
+    Ok(user) -> next(user)
+    Error(_) -> wisp.redirect(\"/login\")
+  }
+}
+"
+}
+
+fn auth_test(app: String) -> String {
+  "import gleeunit/should
+import " <> app <> "/domain/auth
+
+pub fn hash_password_test() {
+  let hash = auth.hash_password(\"secret123\")
+  auth.verify_password(\"secret123\", hash)
+  |> should.be_true
+}
+
+pub fn wrong_password_test() {
+  let hash = auth.hash_password(\"secret123\")
+  auth.verify_password(\"wrong\", hash)
+  |> should.be_false
+}
+"
+}
+
+fn patch_router_auth(app: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  let import_line = "import " <> app <> "/web/auth_handler"
+  let content = add_import(content, import_line)
+
+  let routes =
+    "\n    [\"login\"], http.Get -> auth_handler.login_page(req, ctx)
+    [\"login\"], http.Post -> auth_handler.login(req, ctx)
+    [\"register\"], http.Get -> auth_handler.register_page(req, ctx)
+    [\"register\"], http.Post -> auth_handler.register(req, ctx)
+    [\"logout\"], http.Post -> auth_handler.logout(req, ctx)"
+
+  let content = add_route(content, routes)
+
+  let assert Ok(_) = simplifile.write(router_path, content)
 }
 
 // =============================================================================

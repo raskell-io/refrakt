@@ -5,7 +5,9 @@
 import argv
 import gleam/io
 import gleam/string
+import refrakt/cli/dev
 import refrakt/cli/gen
+import refrakt/cli/migrate_cmd
 import refrakt/cli/new
 import refrakt/cli/routes
 
@@ -17,6 +19,8 @@ pub fn main() {
     ["gen", "migration", name, ..] -> gen.migration(name)
     ["gen", "auth", ..] -> gen.auth()
     ["routes", ..] -> routes.run()
+    ["migrate", ..] -> migrate_cmd.run()
+    ["dev", ..] -> dev.run()
     ["help", ..] | ["--help", ..] | ["-h", ..] -> print_help()
     ["version", ..] | ["--version", ..] | ["-v", ..] ->
       io.println("refrakt 0.1.0")
@@ -47,6 +51,8 @@ fn print_help() {
       "  gen auth                          Generate starter authentication",
       "",
       "  routes                            Print the route table",
+      "  migrate                           Run pending migrations",
+      "  dev                               Start the dev server",
       "",
       "  help                              Show this help",
       "  version                           Show version",
