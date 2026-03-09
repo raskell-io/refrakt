@@ -69,8 +69,10 @@ pub fn main_module(name: String, db: DbChoice) -> String {
   }
 
   let db_ctx = case db {
-    Postgres | Sqlite ->
+    Postgres ->
       "\n  let assert Ok(db) = repo.connect(cfg)\n  let ctx = context.Context(config: cfg, db: db)"
+    Sqlite ->
+      "\n  let db_path = repo.database_path(cfg)\n  let ctx = context.Context(config: cfg, db_path: db_path)"
     NoDb -> "\n  let ctx = context.Context(config: cfg)"
   }
 
@@ -151,7 +153,7 @@ pub fn load() -> Config {
 pub fn context_module(name: String, db: DbChoice) -> String {
   let db_field = case db {
     Postgres -> ", db: pog.Connection"
-    Sqlite -> ""
+    Sqlite -> ", db_path: String"
     NoDb -> ""
   }
 
@@ -525,9 +527,8 @@ pub fn resource_handler(
   type_name: String,
 ) -> String {
   "import gleam/int
-import " <> app_name <> "/data/" <> resource_singular <> "_repo
-import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
 import " <> app_name <> "/context.{type Context}
+import " <> app_name <> "/data/" <> resource_singular <> "_repo
 import " <> app_name <> "/web/error_handler
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
 import " <> app_name <> "/web/layouts/root_layout
