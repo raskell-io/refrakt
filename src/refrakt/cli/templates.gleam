@@ -526,7 +526,12 @@ pub fn resource_handler(
   resource_singular: String,
   type_name: String,
   _first_field: String,
+  db: DbChoice,
 ) -> String {
+  let db_arg = case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
   "import gleam/int
 import " <> app_name <> "/context.{type Context}
 import " <> app_name <> "/data/" <> resource_singular <> "_repo
@@ -538,7 +543,7 @@ import refrakt/flash
 import wisp.{type Request, type Response}
 
 pub fn index(_req: Request, ctx: Context) -> Response {
-  let items = " <> resource_singular <> "_repo.list(ctx.db)
+  let items = " <> resource_singular <> "_repo.list(" <> db_arg <> ")
   " <> resource_singular <> "_views.index_view(items)
   |> root_layout.wrap(\"" <> type_name <> "s\")
   |> wisp.html_response(200)
@@ -548,7 +553,7 @@ pub fn show(req: Request, ctx: Context, id: String) -> Response {
   case int.parse(id) {
     Error(_) -> error_handler.not_found(req)
     Ok(id) ->
-      case " <> resource_singular <> "_repo.get(ctx.db, id) {
+      case " <> resource_singular <> "_repo.get(" <> db_arg <> ", id) {
         Error(_) -> error_handler.not_found(req)
         Ok(item) ->
           " <> resource_singular <> "_views.show_view(item)
@@ -577,7 +582,7 @@ pub fn create(req: Request, ctx: Context) -> Response {
       |> wisp.html_response(422)
 
     Ok(params) ->
-      case " <> resource_singular <> "_repo.create(ctx.db, params) {
+      case " <> resource_singular <> "_repo.create(" <> db_arg <> ", params) {
         Ok(item) ->
           wisp.redirect(\"/" <> resource_plural <> "/\" <> int.to_string(item.id))
           |> flash.set_flash(req, \"info\", \"" <> type_name <> " created\")
@@ -591,7 +596,7 @@ pub fn edit(req: Request, ctx: Context, id: String) -> Response {
   case int.parse(id) {
     Error(_) -> error_handler.not_found(req)
     Ok(id) ->
-      case " <> resource_singular <> "_repo.get(ctx.db, id) {
+      case " <> resource_singular <> "_repo.get(" <> db_arg <> ", id) {
         Error(_) -> error_handler.not_found(req)
         Ok(item) ->
           " <> resource_singular <> "_views.form_view(" <> resource_singular <> "_form.from_" <> resource_singular <> "(item), [])
@@ -617,7 +622,7 @@ pub fn update(req: Request, ctx: Context, id: String) -> Response {
           |> wisp.html_response(422)
 
         Ok(params) ->
-          case " <> resource_singular <> "_repo.update(ctx.db, id, params) {
+          case " <> resource_singular <> "_repo.update(" <> db_arg <> ", id, params) {
             Ok(_) ->
               wisp.redirect(\"/" <> resource_plural <> "/\" <> int.to_string(id))
               |> flash.set_flash(req, \"info\", \"" <> type_name <> " updated\")
@@ -632,7 +637,7 @@ pub fn delete(req: Request, ctx: Context, id: String) -> Response {
   case int.parse(id) {
     Error(_) -> error_handler.not_found(req)
     Ok(id) -> {
-      let _ = " <> resource_singular <> "_repo.delete(ctx.db, id)
+      let _ = " <> resource_singular <> "_repo.delete(" <> db_arg <> ", id)
       wisp.redirect(\"/" <> resource_plural <> "\")
       |> flash.set_flash(req, \"info\", \"" <> type_name <> " deleted\")
     }

@@ -6,6 +6,7 @@ import gleam/list
 import gleam/string
 import refrakt/cli/project
 import refrakt/cli/templates
+import refrakt/cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 import simplifile
 
 // =============================================================================
@@ -66,6 +67,7 @@ pub fn placeholder_test() {
 
 pub fn resource(name: String, raw_fields: List(String)) {
   let app = project.app_name()
+  let db = project.detect_db()
   let singular = singularize(name)
   let type_name = capitalize(singular)
   let fields = parse_fields(raw_fields)
@@ -115,7 +117,14 @@ pub fn resource(name: String, raw_fields: List(String)) {
   let assert Ok(_) =
     simplifile.write(
       handler_path,
-      templates.resource_handler(app, name, singular, type_name, first_field),
+      templates.resource_handler(
+        app,
+        name,
+        singular,
+        type_name,
+        first_field,
+        db,
+      ),
     )
 
   let assert Ok(_) =
@@ -134,10 +143,13 @@ pub fn resource(name: String, raw_fields: List(String)) {
     )
 
   let assert Ok(_) =
-    simplifile.write(repo_path, resource_repo(app, singular, type_name, fields))
+    simplifile.write(
+      repo_path,
+      resource_repo(app, singular, type_name, fields, db),
+    )
 
   let assert Ok(_) =
-    simplifile.write(migration_path, resource_migration(name, fields))
+    simplifile.write(migration_path, resource_migration(name, fields, db))
 
   let assert Ok(_) =
     simplifile.write(test_path, resource_test(app, singular, type_name, fields))
@@ -580,6 +592,244 @@ fn resource_repo(
   resource_singular: String,
   type_name: String,
   fields: List(#(String, String)),
+  db: DbChoice,
+) -> String {
+  case db {
+    Sqlite | NoDb ->
+      resource_repo_sqlite(app_name, resource_singular, type_name, fields)
+    Postgres ->
+      resource_repo_pog(app_name, resource_singular, type_name, fields)
+  }
+}
+
+fn resource_repo_sqlite(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let table = resource_singular <> "s"
+  let field_names = list.map(fields, fn(f) { f.0 }) |> string.join(", ")
+  let select_fields = "id, " <> field_names
+  let q = "\""
+
+  let decoder_fields =
+    fields
+    |> list.index_map(fn(f, i) {
+      let #(name, field_type) = f
+      let decode_fn = case field_type {
+        "bool" -> "sqlight.decode_bool()"
+        "int" -> "decode.int"
+        "float" -> "decode.float"
+        _ -> "decode.string"
+      }
+      "  use "
+      <> name
+      <> " <- decode.field("
+      <> int.to_string(i + 1)
+      <> ", "
+      <> decode_fn
+      <> ")"
+    })
+    |> string.join("\n")
+
+  let constructor_args =
+    fields
+    |> list.map(fn(f) { f.0 <> ": " <> f.0 })
+    |> string.join(", ")
+
+  let insert_placeholders =
+    fields
+    |> list.index_map(fn(_, _i) { "?" })
+    |> string.join(", ")
+
+  let insert_params =
+    fields
+    |> list.map(fn(f) {
+      let #(name, field_type) = f
+      let sq_fn = case field_type {
+        "bool" -> "sqlight.bool"
+        "int" -> "sqlight.int"
+        "float" -> "sqlight.float"
+        _ -> "sqlight.text"
+      }
+      "    " <> sq_fn <> "(params." <> name <> "),"
+    })
+    |> string.join("\n")
+
+  let update_sets =
+    fields
+    |> list.index_map(fn(f, _i) { f.0 <> " = ?" })
+    |> string.join(", ")
+
+  string.join(
+    [
+      "import gleam/dynamic/decode",
+      "import gleam/result",
+      "import "
+        <> app_name
+        <> "/domain/"
+        <> resource_singular
+        <> ".{type "
+        <> type_name
+        <> ", "
+        <> type_name
+        <> "}",
+      "import "
+        <> app_name
+        <> "/web/forms/"
+        <> resource_singular
+        <> "_form.{type "
+        <> type_name
+        <> "Params}",
+      "import sqlight",
+      "",
+      "fn "
+        <> resource_singular
+        <> "_decoder() -> decode.Decoder("
+        <> type_name
+        <> ") {",
+      "  use id <- decode.field(0, decode.int)",
+      decoder_fields,
+      "  decode.success("
+        <> type_name
+        <> "(id: id, "
+        <> constructor_args
+        <> "))",
+      "}",
+      "",
+      "pub fn list(db_path: String) -> List(" <> type_name <> ") {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  case sqlight.query("
+        <> q
+        <> "SELECT "
+        <> select_fields
+        <> " FROM "
+        <> table
+        <> " ORDER BY id DESC"
+        <> q
+        <> ", on: conn, with: [], expecting: "
+        <> resource_singular
+        <> "_decoder()) {",
+      "    Ok(rows) -> rows",
+      "    Error(_) -> []",
+      "  }",
+      "}",
+      "",
+      "pub fn get(db_path: String, id: Int) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query("
+        <> q
+        <> "SELECT "
+        <> select_fields
+        <> " FROM "
+        <> table
+        <> " WHERE id = ?"
+        <> q
+        <> ", on: conn, with: [sqlight.int(id)], expecting: "
+        <> resource_singular
+        <> "_decoder())",
+      "  |> result.replace_error(Nil)",
+      "  |> result.try(fn(rows) {",
+      "    case rows {",
+      "      [item] -> Ok(item)",
+      "      _ -> Error(Nil)",
+      "    }",
+      "  })",
+      "}",
+      "",
+      "pub fn create(db_path: String, params: "
+        <> type_name
+        <> "Params) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query(",
+      "    "
+        <> q
+        <> "INSERT INTO "
+        <> table
+        <> " ("
+        <> field_names
+        <> ") VALUES ("
+        <> insert_placeholders
+        <> ") RETURNING "
+        <> select_fields
+        <> q
+        <> ",",
+      "    on: conn,",
+      "    with: [",
+      insert_params,
+      "    ],",
+      "    expecting: " <> resource_singular <> "_decoder(),",
+      "  )",
+      "  |> result.replace_error(Nil)",
+      "  |> result.try(fn(rows) {",
+      "    case rows {",
+      "      [item] -> Ok(item)",
+      "      _ -> Error(Nil)",
+      "    }",
+      "  })",
+      "}",
+      "",
+      "pub fn update(",
+      "  db_path: String,",
+      "  id: Int,",
+      "  params: " <> type_name <> "Params,",
+      ") -> Result(" <> type_name <> ", Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query(",
+      "    "
+        <> q
+        <> "UPDATE "
+        <> table
+        <> " SET "
+        <> update_sets
+        <> " WHERE id = ? RETURNING "
+        <> select_fields
+        <> q
+        <> ",",
+      "    on: conn,",
+      "    with: [",
+      insert_params,
+      "      sqlight.int(id),",
+      "    ],",
+      "    expecting: " <> resource_singular <> "_decoder(),",
+      "  )",
+      "  |> result.replace_error(Nil)",
+      "  |> result.try(fn(rows) {",
+      "    case rows {",
+      "      [item] -> Ok(item)",
+      "      _ -> Error(Nil)",
+      "    }",
+      "  })",
+      "}",
+      "",
+      "pub fn delete(db_path: String, id: Int) -> Result(Nil, Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query("
+        <> q
+        <> "DELETE FROM "
+        <> table
+        <> " WHERE id = ?"
+        <> q
+        <> ", on: conn, with: [sqlight.int(id)], expecting: decode.success(Nil))",
+      "  |> result.replace(Nil)",
+      "  |> result.replace_error(Nil)",
+      "}",
+      "",
+    ],
+    "\n",
+  )
+}
+
+fn resource_repo_pog(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
 ) -> String {
   let field_names =
     fields
@@ -800,22 +1050,41 @@ fn resource_repo(
   )
 }
 
-fn resource_migration(name: String, fields: List(#(String, String))) -> String {
+fn resource_migration(
+  name: String,
+  fields: List(#(String, String)),
+  db: DbChoice,
+) -> String {
   let column_defs =
     fields
     |> list.map(fn(f) {
       let #(field_name, field_type) = f
-      "  " <> field_name <> " " <> to_sql_type(field_type) <> " NOT NULL"
+      let sql_type = case db {
+        Sqlite -> to_sql_type_sqlite(field_type)
+        _ -> to_sql_type(field_type)
+      }
+      "  " <> field_name <> " " <> sql_type <> " NOT NULL"
     })
     |> string.join(",\n")
 
-  "CREATE TABLE " <> singularize(name) <> "s (
+  let table = singularize(name) <> "s"
+
+  case db {
+    Sqlite -> "CREATE TABLE " <> table <> " (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+" <> column_defs <> ",
+  inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"
+    _ -> "CREATE TABLE " <> table <> " (
   id SERIAL PRIMARY KEY,
 " <> column_defs <> ",
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "
+  }
 }
 
 fn resource_test(
@@ -1039,6 +1308,19 @@ pub fn to_sql_type(field_type: String) -> String {
     "bool" -> "BOOLEAN"
     "date" -> "DATE"
     "datetime" -> "TIMESTAMPTZ"
+    _ -> "TEXT"
+  }
+}
+
+fn to_sql_type_sqlite(field_type: String) -> String {
+  case field_type {
+    "string" -> "TEXT"
+    "text" -> "TEXT"
+    "int" -> "INTEGER"
+    "float" -> "REAL"
+    "bool" -> "INTEGER"
+    "date" -> "TEXT"
+    "datetime" -> "TEXT"
     _ -> "TEXT"
   }
 }

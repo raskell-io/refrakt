@@ -2,32 +2,42 @@
 ///
 import gleam/io
 import gleam/list
+import gleam/string
 import refrakt/cli/templates
 import refrakt/cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 import simplifile
 
-pub fn run(name: String, flags: List(String)) {
+pub fn run(path: String, flags: List(String)) {
   let db = parse_db_flag(flags)
 
-  io.println("Creating " <> name <> "...")
+  // Extract package name from path (last segment)
+  let name = case string.split(path, "/") {
+    [] -> path
+    parts -> {
+      let assert Ok(last) = list.last(parts)
+      last
+    }
+  }
+
+  io.println("Creating " <> path <> "...")
   io.println("")
 
   // Create directory structure
   let dirs = [
-    name,
-    name <> "/src",
-    name <> "/src/" <> name,
-    name <> "/src/" <> name <> "/web",
-    name <> "/src/" <> name <> "/web/layouts",
-    name <> "/src/" <> name <> "/web/components",
-    name <> "/src/" <> name <> "/web/forms",
-    name <> "/src/" <> name <> "/web/middleware",
-    name <> "/src/" <> name <> "/domain",
-    name <> "/src/" <> name <> "/data",
-    name <> "/priv/static/css",
-    name <> "/priv/static/js",
-    name <> "/test",
-    name <> "/test/" <> name <> "/web",
+    path,
+    path <> "/src",
+    path <> "/src/" <> name,
+    path <> "/src/" <> name <> "/web",
+    path <> "/src/" <> name <> "/web/layouts",
+    path <> "/src/" <> name <> "/web/components",
+    path <> "/src/" <> name <> "/web/forms",
+    path <> "/src/" <> name <> "/web/middleware",
+    path <> "/src/" <> name <> "/domain",
+    path <> "/src/" <> name <> "/data",
+    path <> "/priv/static/css",
+    path <> "/priv/static/js",
+    path <> "/test",
+    path <> "/test/" <> name <> "/web",
   ]
 
   list.each(dirs, fn(dir) {
@@ -36,40 +46,40 @@ pub fn run(name: String, flags: List(String)) {
 
   // Write files
   let files = [
-    #(name <> "/gleam.toml", templates.gleam_toml(name, db)),
-    #(name <> "/.gitignore", templates.gitignore()),
-    #(name <> "/README.md", templates.readme(name)),
-    #(name <> "/src/" <> name <> ".gleam", templates.main_module(name, db)),
-    #(name <> "/src/" <> name <> "/config.gleam", templates.config_module(name)),
+    #(path <> "/gleam.toml", templates.gleam_toml(name, db)),
+    #(path <> "/.gitignore", templates.gitignore()),
+    #(path <> "/README.md", templates.readme(name)),
+    #(path <> "/src/" <> name <> ".gleam", templates.main_module(name, db)),
+    #(path <> "/src/" <> name <> "/config.gleam", templates.config_module(name)),
     #(
-      name <> "/src/" <> name <> "/context.gleam",
+      path <> "/src/" <> name <> "/context.gleam",
       templates.context_module(name, db),
     ),
     #(
-      name <> "/src/" <> name <> "/router.gleam",
+      path <> "/src/" <> name <> "/router.gleam",
       templates.router_module(name, db),
     ),
     #(
-      name <> "/src/" <> name <> "/web/home_handler.gleam",
+      path <> "/src/" <> name <> "/web/home_handler.gleam",
       templates.home_handler(name),
     ),
     #(
-      name <> "/src/" <> name <> "/web/error_handler.gleam",
+      path <> "/src/" <> name <> "/web/error_handler.gleam",
       templates.error_handler(name),
     ),
     #(
-      name <> "/src/" <> name <> "/web/layouts/root_layout.gleam",
+      path <> "/src/" <> name <> "/web/layouts/root_layout.gleam",
       templates.root_layout(),
     ),
     #(
-      name <> "/src/" <> name <> "/web/components/flash.gleam",
+      path <> "/src/" <> name <> "/web/components/flash.gleam",
       templates.flash_component(),
     ),
-    #(name <> "/priv/static/css/app.css", templates.app_css()),
-    #(name <> "/priv/static/js/app.js", templates.app_js()),
-    #(name <> "/test/" <> name <> "_test.gleam", templates.main_test(name)),
+    #(path <> "/priv/static/css/app.css", templates.app_css()),
+    #(path <> "/priv/static/js/app.js", templates.app_js()),
+    #(path <> "/test/" <> name <> "_test.gleam", templates.main_test(name)),
     #(
-      name <> "/test/" <> name <> "/web/home_handler_test.gleam",
+      path <> "/test/" <> name <> "/web/home_handler_test.gleam",
       templates.home_handler_test(name),
     ),
   ]
@@ -78,7 +88,7 @@ pub fn run(name: String, flags: List(String)) {
   let files = case db {
     Postgres | Sqlite -> [
       #(
-        name <> "/src/" <> name <> "/data/repo.gleam",
+        path <> "/src/" <> name <> "/data/repo.gleam",
         templates.repo_module(name, db),
       ),
       ..files
@@ -87,12 +97,12 @@ pub fn run(name: String, flags: List(String)) {
   }
 
   list.each(files, fn(file) {
-    let #(path, content) = file
-    let assert Ok(_) = simplifile.write(path, content)
+    let #(file_path, content) = file
+    let assert Ok(_) = simplifile.write(file_path, content)
   })
 
   // Print results
-  io.println("  " <> name <> "/")
+  io.println("  " <> path <> "/")
   io.println("    gleam.toml")
   io.println("    .gitignore")
   io.println("    README.md")
@@ -123,7 +133,7 @@ pub fn run(name: String, flags: List(String)) {
   io.println("        home_handler_test.gleam")
   io.println("")
   io.println("Run your app:")
-  io.println("  cd " <> name)
+  io.println("  cd " <> path)
   io.println("  gleam run")
   io.println("  → http://localhost:4000")
 }
