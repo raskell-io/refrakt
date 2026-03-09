@@ -1,0 +1,21 @@
+# Gleam
+/build/
+**/build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude
+.claude/settings.local.json
+
+# Test artifacts
+/test_app/
+/tmp/

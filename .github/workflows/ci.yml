@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          gleam-version: "1.14"
+          rebar3-version: "3"
+
+      - name: Check formatting
+        run: gleam format --check
+
+      - name: Build
+        run: gleam build
+
+      - name: Test
+        run: gleam test
+
+      - name: Docs
+        run: gleam docs build

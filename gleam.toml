@@ -1,0 +1,17 @@
+name = "refrakt"
+version = "0.1.0"
+target = "erlang"
+description = "A convention-first web framework for Gleam"
+licences = ["MIT"]
+repository = { type = "github", user = "raskell-io", repo = "refrakt" }
+gleam = ">= 1.14.0"
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+gleam_erlang = ">= 0.34.0 and < 2.0.0"
+gleam_http = ">= 4.3.0 and < 5.0.0"
+wisp = ">= 2.2.0 and < 3.0.0"
+lustre = ">= 5.6.0 and < 6.0.0"
+
+[dev-dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

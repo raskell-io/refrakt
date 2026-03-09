@@ -1,0 +1,107 @@
+# Refrakt - mise configuration
+# https://mise.jdx.dev/
+
+[tools]
+erlang = "27"
+gleam = "1.14"
+rebar = "3"
+
+# =============================================================================
+# Build
+# =============================================================================
+
+[tasks.build]
+description = "Build all packages"
+run = "gleam build"
+
+[tasks.check]
+description = "Type-check without full build"
+run = "gleam check"
+
+# =============================================================================
+# Development
+# =============================================================================
+
+[tasks.fmt]
+description = "Format code"
+run = "gleam format"
+
+[tasks."fmt:check"]
+description = "Check formatting"
+run = "gleam format --check"
+
+# =============================================================================
+# Test
+# =============================================================================
+
+[tasks.test]
+description = "Run all tests"
+run = "gleam test"
+
+# =============================================================================
+# Documentation
+# =============================================================================
+
+[tasks.doc]
+description = "Generate documentation"
+run = "gleam docs build"
+
+[tasks."doc:open"]
+description = "Generate and open documentation"
+run = "gleam docs build --open"
+
+# =============================================================================
+# Lint
+# =============================================================================
+
+[tasks.lint]
+description = "Run all lints (format check)"
+depends = ["fmt:check"]
+
+# =============================================================================
+# CI
+# =============================================================================
+
+[tasks.ci]
+description = "Run full CI pipeline"
+depends = ["fmt:check", "build", "test", "doc"]
+
+[tasks."ci:quick"]
+description = "Quick CI check"
+depends = ["check", "test"]
+
+# =============================================================================
+# CLI Testing
+# =============================================================================
+
+[tasks."cli:new"]
+description = "Test refrakt new (creates test_app/)"
+run = "gleam run -m refrakt_cli -- new test_app --db postgres"
+
+[tasks."cli:gen"]
+description = "Test refrakt gen resource inside test_app/"
+run = "cd test_app && gleam run -m refrakt_cli -- gen resource posts title:string body:text published:bool"
+
+[tasks."cli:clean"]
+description = "Remove test_app/ created by cli:new"
+run = "rm -rf test_app/"
+
+# =============================================================================
+# Release
+# =============================================================================
+
+[tasks.release]
+description = "Full release pipeline"
+depends = ["lint", "test", "build"]
+
+# =============================================================================
+# Maintenance
+# =============================================================================
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "rm -rf build/"
+
+[tasks.deps]
+description = "Update dependencies"
+run = "gleam update"
