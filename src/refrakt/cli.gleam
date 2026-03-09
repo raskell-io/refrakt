@@ -18,6 +18,7 @@ pub fn main() {
     ["gen", "resource", name, ..fields] -> gen.resource(name, fields)
     ["gen", "migration", name, ..] -> gen.migration(name)
     ["gen", "auth", ..] -> gen.auth()
+    ["gen", "island", name, ..] -> gen.island(name)
     ["routes", ..] -> routes.run()
     ["migrate", ..] -> migrate_cmd.run()
     ["dev", ..] -> dev.run()
@@ -49,6 +50,7 @@ fn print_help() {
       "  gen resource <name> <fields...>   Generate CRUD resource",
       "  gen migration <name>              Generate a SQL migration file",
       "  gen auth                          Generate starter authentication",
+      "  gen island <name>                 Generate a Lustre interactive island",
       "",
       "  routes                            Print the route table",
       "  migrate                           Run pending migrations",
