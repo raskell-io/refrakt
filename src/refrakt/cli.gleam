@@ -20,6 +20,7 @@ pub fn main() {
     ["gen", "migration", name, ..] -> gen.migration(name)
     ["gen", "auth", ..] -> gen.auth()
     ["gen", "island", name, ..] -> gen.island(name)
+    ["gen", "live", name, ..] -> gen.live(name)
     ["routes", ..] -> routes.run()
     ["migrate", ..] -> migrate_cmd.run()
     ["build", ..] -> build.run()
@@ -53,6 +54,7 @@ fn print_help() {
       "  gen migration <name>              Generate a SQL migration file",
       "  gen auth                          Generate starter authentication",
       "  gen island <name>                 Generate a Lustre interactive island",
+      "  gen live <name>                   Generate a Lustre server component",
       "",
       "  routes                            Print the route table",
       "  migrate                           Run pending migrations",

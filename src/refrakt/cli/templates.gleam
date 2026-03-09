@@ -30,6 +30,7 @@ envoy = \">= 1.1.0 and < 2.0.0\"
 mist = \">= 5.0.0 and < 6.0.0\"
 wisp = \">= 2.2.0 and < 3.0.0\"
 lustre = \">= 5.6.0 and < 6.0.0\"
+gleam_json = \">= 3.1.0 and < 4.0.0\"
 refrakt = \">= 0.1.0 and < 1.0.0\"" <> db_dep <> "
 
 [dev-dependencies]

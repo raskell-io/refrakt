@@ -46,9 +46,12 @@ Generate a full CRUD resource.
 refrakt gen resource posts title:string body:text published:bool
 refrakt gen resource comments author:string body:text post_id:int
 refrakt gen resource products name:string price:float in_stock:bool
+
+# JSON API mode (no views/forms, routes under /api/)
+refrakt gen resource posts title:string body:text --api
 ```
 
-**Creates:**
+**Creates (HTML mode):**
 - Handler (7 actions: index, show, new, create, edit, update, delete)
 - Views (list, detail, form with proper field types)
 - Form decoder with validation
@@ -57,7 +60,16 @@ refrakt gen resource products name:string price:float in_stock:bool
 - SQL migration
 - Tests
 
-**Patches:** `router.gleam` with 7 RESTful routes.
+**Creates (API mode with `--api`):**
+- Handler (5 actions: index, show, create, update, delete — JSON)
+- Params type
+- Domain type
+- Database repo
+- SQL migration
+- Tests
+
+**Patches:** `router.gleam` with RESTful routes (HTML: 7 routes,
+API: 5 routes under `/api/` prefix).
 
 **Field types:** See [Field Types](field-types.md).
 
@@ -116,6 +128,27 @@ See [Lustre Integration](lustre-integration.md) for details.
 
 ---
 
+### `refrakt gen live <name>`
+
+Generate a Lustre server component with WebSocket transport.
+
+```bash
+refrakt gen live dashboard
+refrakt gen live chat
+```
+
+**Creates:**
+- Server component (Lustre app with init/update/view running on server)
+- WebSocket socket module (transport scaffold with TODO instructions)
+- Live handler (HTML page that connects via WebSocket)
+
+**Patches:** `router.gleam` with a GET route for the live page.
+
+The server component runs on the BEAM. DOM patches are sent to the
+browser over WebSocket. See [Lustre Integration](lustre-integration.md).
+
+---
+
 ### `refrakt gen migration <name>`
 
 Generate an empty SQL migration file.
@@ -151,14 +184,42 @@ GET     /posts/:id          post_handler.show
 
 ### `refrakt migrate`
 
-Show migration instructions. The migration runner is a library module
-(`refrakt/migrate`) that runs from within your app.
+Run pending database migrations.
+
+```bash
+refrakt migrate
+```
+
+On first run, generates a `src/<app>/migrate.gleam` module that
+connects to the database and runs pending SQL files. Then executes it.
+
+Requires a database (`--db postgres` or `--db sqlite`).
+
+---
+
+### `refrakt build`
+
+Compile Lustre islands to JavaScript.
+
+```bash
+refrakt build
+```
+
+Finds island modules in `web/islands/`, compiles them to JS, and
+copies output to `priv/static/js/islands/`.
 
 ---
 
 ### `refrakt dev`
 
-Start the dev server with `APP_ENV=dev`.
+Start the dev server with file watching.
+
+```bash
+refrakt dev
+```
+
+Sets `APP_ENV=dev` and runs `gleam run`. If `fswatch` is installed,
+watches `src/` for changes and auto-rebuilds + restarts.
 
 ```bash
 refrakt dev

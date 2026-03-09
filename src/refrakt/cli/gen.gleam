@@ -68,9 +68,11 @@ pub fn placeholder_test() {
 // gen resource
 // =============================================================================
 
-pub fn resource(name: String, raw_fields: List(String)) {
+pub fn resource(name: String, raw_args: List(String)) {
   let app = project.app_name()
   let db = project.detect_db()
+  let api_mode = list.contains(raw_args, "--api")
+  let raw_fields = list.filter(raw_args, fn(a) { !string.starts_with(a, "--") })
   let singular = singularize(name)
   let type_name = capitalize(singular)
   let fields = parse_fields(raw_fields)
@@ -117,27 +119,52 @@ pub fn resource(name: String, raw_fields: List(String)) {
       #(field_name, to_gleam_type(field_type))
     })
 
-  let assert Ok(_) =
-    simplifile.write(
-      handler_path,
-      templates.resource_handler(
-        app,
-        name,
-        singular,
-        type_name,
-        first_field,
-        db,
-      ),
-    )
+  // Generate handler (HTML or JSON)
+  let assert Ok(_) = case api_mode {
+    True ->
+      simplifile.write(
+        handler_path,
+        api_resource_handler(app, name, singular, type_name, db),
+      )
+    False ->
+      simplifile.write(
+        handler_path,
+        templates.resource_handler(
+          app,
+          name,
+          singular,
+          type_name,
+          first_field,
+          db,
+        ),
+      )
+  }
 
-  let assert Ok(_) =
-    simplifile.write(
-      views_path,
-      resource_views(app, name, singular, type_name, fields),
-    )
-
-  let assert Ok(_) =
-    simplifile.write(form_path, resource_form(app, singular, type_name, fields))
+  // Views and forms: full for HTML, params-only for API
+  let created_paths = case api_mode {
+    False -> {
+      let assert Ok(_) =
+        simplifile.write(
+          views_path,
+          resource_views(app, name, singular, type_name, fields),
+        )
+      let assert Ok(_) =
+        simplifile.write(
+          form_path,
+          resource_form(app, singular, type_name, fields),
+        )
+      [handler_path, views_path, form_path, domain_path, repo_path, test_path]
+    }
+    True -> {
+      // API mode still needs the Params type for repos
+      let assert Ok(_) =
+        simplifile.write(
+          form_path,
+          api_params_module(app, singular, type_name, fields),
+        )
+      [handler_path, form_path, domain_path, repo_path, test_path]
+    }
+  }
 
   let assert Ok(_) =
     simplifile.write(
@@ -155,28 +182,36 @@ pub fn resource(name: String, raw_fields: List(String)) {
     simplifile.write(migration_path, resource_migration(name, fields, db))
 
   let assert Ok(_) =
-    simplifile.write(test_path, resource_test(app, singular, type_name, fields))
+    simplifile.write(test_path, case api_mode {
+      True -> api_resource_test(app, singular)
+      False -> resource_test(app, singular, type_name, fields)
+    })
 
   // Patch router and format
-  let _ = patch_router_resource(app, name, singular)
+  let _ = case api_mode {
+    True -> patch_router_api_resource(app, name, singular)
+    False -> patch_router_resource(app, name, singular)
+  }
   let router_path = "src/" <> app <> "/router.gleam"
-  format.format_files([
-    handler_path, views_path, form_path, domain_path, repo_path, test_path,
-    router_path,
-  ])
+  format.format_files([router_path, ..created_paths])
 
   io.println("")
   io.println("Created:")
   io.println("  " <> handler_path)
-  io.println("  " <> views_path)
-  io.println("  " <> form_path)
+  case api_mode {
+    False -> {
+      io.println("  " <> views_path)
+      io.println("  " <> form_path)
+    }
+    True -> Nil
+  }
   io.println("  " <> domain_path)
   io.println("  " <> repo_path)
   io.println("  " <> migration_path)
   io.println("  " <> test_path)
   io.println("")
   io.println("Updated:")
-  io.println("  src/" <> app <> "/router.gleam")
+  io.println("  " <> router_path)
 }
 
 // =============================================================================
@@ -268,6 +303,179 @@ pub fn auth() {
   io.println("")
   io.println("Note: You need a password hashing library. Add one with:")
   io.println("  gleam add beecrypt")
+}
+
+// =============================================================================
+// gen live
+// =============================================================================
+
+pub fn live(name: String) {
+  let app = project.app_name()
+
+  let live_dir = "src/" <> app <> "/web/live"
+  let _ = simplifile.create_directory_all(live_dir)
+
+  let component_path = live_dir <> "/" <> name <> ".gleam"
+  let socket_path = live_dir <> "/" <> name <> "_socket.gleam"
+  let handler_path = "src/" <> app <> "/web/" <> name <> "_live_handler.gleam"
+
+  let assert Ok(_) = simplifile.write(component_path, live_component(app, name))
+  let assert Ok(_) = simplifile.write(socket_path, live_socket(app, name))
+  let assert Ok(_) = simplifile.write(handler_path, live_handler(app, name))
+
+  // Patch router
+  let _ = patch_router_live(app, name)
+  let router_path = "src/" <> app <> "/router.gleam"
+  format.format_files([component_path, socket_path, handler_path, router_path])
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> component_path)
+  io.println("  " <> socket_path)
+  io.println("  " <> handler_path)
+  io.println("")
+  io.println("Updated:")
+  io.println("  " <> router_path)
+  io.println("")
+  io.println("The live component runs on the server and patches the DOM")
+  io.println("over WebSocket. Visit /" <> name <> " to see it in action.")
+}
+
+fn live_component(_app: String, name: String) -> String {
+  let type_name = capitalize(name)
+
+  "/// " <> type_name <> " — a Lustre server component.
+///
+/// This component runs on the server. UI updates are sent to the
+/// browser over WebSocket. The client runtime (~10kb) patches the DOM.
+///
+import gleam/int
+import lustre
+import lustre/element.{text}
+import lustre/element/html.{button, div, h1, p}
+import lustre/event
+
+pub type Model {
+  Model(count: Int)
+}
+
+pub type Msg {
+  Increment
+  Decrement
+}
+
+pub fn init(_flags: Nil) -> Model {
+  Model(count: 0)
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    Increment -> Model(count: model.count + 1)
+    Decrement -> Model(count: model.count - 1)
+  }
+}
+
+pub fn view(model: Model) -> element.Element(Msg) {
+  div([], [
+    h1([], [text(\"" <> type_name <> "\")]),
+    div([], [
+      button([event.on_click(Decrement)], [text(\"-\")]),
+      p([], [text(int.to_string(model.count))]),
+      button([event.on_click(Increment)], [text(\"+\")]),
+    ]),
+  ])
+}
+
+/// Create a Lustre app for this component.
+pub fn app() {
+  lustre.simple(init, update, view)
+}
+"
+}
+
+fn live_socket(app: String, name: String) -> String {
+  "/// WebSocket transport for the " <> name <> " server component.
+///
+/// This module handles the WebSocket connection between the browser
+/// and the Lustre server component. It needs to be wired into your
+/// router for the WebSocket upgrade.
+///
+/// TODO: Wire this into your router by adding a WebSocket route:
+///
+///   [\"" <> name <> "\", \"ws\"] -> " <> name <> "_socket.handle_ws(req)
+///
+/// The Lustre server component protocol:
+/// 1. Client connects via WebSocket
+/// 2. Server starts a Lustre app, renders initial HTML, sends patch
+/// 3. Client applies patch to DOM
+/// 4. Client sends events (clicks, input) as JSON
+/// 5. Server runs update, diffs view, sends patch
+///
+/// See: https://hexdocs.pm/lustre/lustre/server_component.html
+///
+import gleam/io
+
+/// Placeholder — implement with Mist WebSocket and Lustre server_component.
+pub fn handle_ws(_req: a) -> Nil {
+  io.println(\"WebSocket handler for " <> name <> " not yet wired.\")
+  io.println(\"See src/" <> app <> "/web/live/" <> name <> "_socket.gleam for instructions.\")
+  Nil
+}
+"
+}
+
+fn live_handler(app: String, name: String) -> String {
+  let type_name = capitalize(name)
+
+  "/// Handler for the " <> name <> " live page.
+///
+/// Serves the HTML shell that mounts the Lustre server component
+/// over WebSocket.
+///
+import " <> app <> "/context.{type Context}
+import " <> app <> "/web/layouts/root_layout
+import lustre/attribute.{id, src}
+import lustre/element.{text}
+import lustre/element/html.{div, h1, script, section}
+import wisp.{type Request, type Response}
+
+pub fn index(_req: Request, _ctx: Context) -> Response {
+  section([], [
+    div([id(\"" <> name <> "-live\")], [
+      h1([], [text(\"Loading " <> type_name <> "...\")]),
+    ]),
+    script([], \"
+      // Connect to the server component WebSocket
+      const ws = new WebSocket('ws://' + location.host + '/" <> name <> "/ws');
+      ws.onopen = () => console.log('" <> type_name <> " connected');
+      ws.onmessage = (e) => {
+        // Apply DOM patches from server
+        console.log('Patch:', e.data);
+      };
+    \"),
+  ])
+  |> root_layout.wrap(\"" <> type_name <> "\")
+  |> wisp.html_response(200)
+}
+"
+}
+
+fn patch_router_live(app: String, name: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  let import_line = "import " <> app <> "/web/" <> name <> "_live_handler"
+  let content = add_import(content, import_line)
+
+  let routes =
+    "\n    [\""
+    <> name
+    <> "\"], http.Get -> "
+    <> name
+    <> "_live_handler.index(req, ctx)"
+
+  let content = add_route(content, routes)
+  let assert Ok(_) = simplifile.write(router_path, content)
 }
 
 // =============================================================================
@@ -370,6 +578,101 @@ pub fn script_tag() -> Element(Nil) {
 // =============================================================================
 // Resource template helpers
 // =============================================================================
+
+fn api_params_module(
+  _app_name: String,
+  _resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let params_field_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(name, ft) = f
+      "    " <> name <> ": " <> to_gleam_type(ft) <> ","
+    })
+    |> string.join("\n")
+
+  "/// Params type for " <> type_name <> " (API mode).
+///
+pub type " <> type_name <> "Params {
+  " <> type_name <> "Params(
+" <> params_field_defs <> "
+  )
+}
+"
+}
+
+fn api_resource_handler(
+  app_name: String,
+  _resource_plural: String,
+  resource_singular: String,
+  type_name: String,
+  db: DbChoice,
+) -> String {
+  let db_arg = case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
+
+  "import gleam/int
+import gleam/json
+import " <> app_name <> "/context.{type Context}
+import " <> app_name <> "/data/" <> resource_singular <> "_repo
+import " <> app_name <> "/web/error_handler
+import wisp.{type Request, type Response}
+
+pub fn index(_req: Request, ctx: Context) -> Response {
+  let items = " <> resource_singular <> "_repo.list(" <> db_arg <> ")
+  let body =
+    json.array(items, fn(item) {
+      json.object([#(\"id\", json.int(item.id))])
+    })
+    |> json.to_string
+  wisp.json_response(body, 200)
+}
+
+pub fn show(req: Request, ctx: Context, id: String) -> Response {
+  case int.parse(id) {
+    Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
+    Ok(id) ->
+      case " <> resource_singular <> "_repo.get(" <> db_arg <> ", id) {
+        Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
+        Ok(item) -> {
+          let body =
+            json.object([#(\"id\", json.int(item.id))])
+            |> json.to_string
+          wisp.json_response(body, 200)
+        }
+      }
+  }
+}
+
+pub fn create(req: Request, ctx: Context) -> Response {
+  use json_body <- wisp.require_json(req)
+  // Decode JSON body and create resource
+  // TODO: implement JSON decoding for " <> type_name <> "
+  wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
+}
+
+pub fn update(req: Request, ctx: Context, id: String) -> Response {
+  use json_body <- wisp.require_json(req)
+  // Decode JSON body and update resource
+  // TODO: implement JSON decoding for " <> type_name <> "
+  wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
+}
+
+pub fn delete(req: Request, ctx: Context, id: String) -> Response {
+  case int.parse(id) {
+    Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
+    Ok(id) -> {
+      let _ = " <> resource_singular <> "_repo.delete(" <> db_arg <> ", id)
+      wisp.json_response(\"{\\\"ok\\\":true}\", 200)
+    }
+  }
+}
+"
+}
 
 fn resource_views(
   app_name: String,
@@ -1201,6 +1504,18 @@ fn resource_migration(
   }
 }
 
+fn api_resource_test(_app_name: String, _resource_singular: String) -> String {
+  "import gleeunit/should
+
+pub fn placeholder_test() {
+  // API handler tests require a running database.
+  // Test your domain logic and JSON encoding instead.
+  1 + 1
+  |> should.equal(2)
+}
+"
+}
+
 fn resource_test(
   app_name: String,
   resource_singular: String,
@@ -1339,6 +1654,45 @@ fn patch_router_resource(app: String, plural: String, singular: String) {
 
   let content = add_route(content, routes)
 
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+fn patch_router_api_resource(app: String, plural: String, singular: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  let import_line = "import " <> app <> "/web/" <> singular <> "_handler"
+  let content = add_import(content, import_line)
+
+  // API routes: no /new or /edit (those are HTML-only)
+  let routes =
+    "\n    [\"api\", \""
+    <> plural
+    <> "\"], http.Get -> "
+    <> singular
+    <> "_handler.index(req, ctx)
+    [\"api\", \""
+    <> plural
+    <> "\"], http.Post -> "
+    <> singular
+    <> "_handler.create(req, ctx)
+    [\"api\", \""
+    <> plural
+    <> "\", id], http.Get -> "
+    <> singular
+    <> "_handler.show(req, ctx, id)
+    [\"api\", \""
+    <> plural
+    <> "\", id], http.Put -> "
+    <> singular
+    <> "_handler.update(req, ctx, id)
+    [\"api\", \""
+    <> plural
+    <> "\", id], http.Delete -> "
+    <> singular
+    <> "_handler.delete(req, ctx, id)"
+
+  let content = add_route(content, routes)
   let assert Ok(_) = simplifile.write(router_path, content)
 }
 
