@@ -101,6 +101,11 @@ pub fn resource(name: String, raw_fields: List(String)) {
   )
 
   // Generate files
+  let first_field = case fields {
+    [#(name, _), ..] -> name
+    [] -> "id"
+  }
+
   let gleam_fields =
     list.map(fields, fn(f) {
       let #(field_name, field_type) = f
@@ -110,7 +115,7 @@ pub fn resource(name: String, raw_fields: List(String)) {
   let assert Ok(_) =
     simplifile.write(
       handler_path,
-      templates.resource_handler(app, name, singular, type_name),
+      templates.resource_handler(app, name, singular, type_name, first_field),
     )
 
   let assert Ok(_) =
@@ -269,6 +274,16 @@ fn resource_views(
         textarea([name(\"" <> fname <> "\")], values." <> fname <> "),
         field_error(errors, \"" <> fname <> "\"),
       ]),"
+        "int" -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        input([type_(\"number\"), name(\"" <> fname <> "\"), value(int.to_string(values." <> fname <> "))]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+        "float" -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        input([type_(\"number\"), name(\"" <> fname <> "\"), value(float.to_string(values." <> fname <> "))]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
         _ -> "      div([class(\"field\")], [
         label([], [text(\"" <> label_text <> "\")]),
         input([type_(\"text\"), name(\"" <> fname <> "\"), value(values." <> fname <> ")]),
@@ -278,7 +293,12 @@ fn resource_views(
     })
     |> string.join("\n")
 
-  "import gleam/int
+  let float_import = case list.any(fields, fn(f) { f.1 == "float" }) {
+    True -> "\nimport gleam/float"
+    False -> ""
+  }
+
+  "import gleam/int" <> float_import <> "
 import gleam/list
 import gleam/option
 import lustre/attribute.{class, href, name, type_, value}
@@ -401,6 +421,18 @@ fn resource_form(
           <> ": list.any(data.values, fn(v) { v.0 == \""
           <> field_name
           <> "\" }),"
+        "int" ->
+          "    "
+          <> field_name
+          <> ": result.unwrap(int.parse(get_value(data, \""
+          <> field_name
+          <> "\")), 0),"
+        "float" ->
+          "    "
+          <> field_name
+          <> ": result.unwrap(float.parse(get_value(data, \""
+          <> field_name
+          <> "\")), 0.0),"
         _ ->
           "    " <> field_name <> ": get_value(data, \"" <> field_name <> "\"),"
       }

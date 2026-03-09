@@ -525,6 +525,7 @@ pub fn resource_handler(
   resource_plural: String,
   resource_singular: String,
   type_name: String,
+  _first_field: String,
 ) -> String {
   "import gleam/int
 import " <> app_name <> "/context.{type Context}
@@ -551,7 +552,7 @@ pub fn show(req: Request, ctx: Context, id: String) -> Response {
         Error(_) -> error_handler.not_found(req)
         Ok(item) ->
           " <> resource_singular <> "_views.show_view(item)
-          |> root_layout.wrap(item.title)
+          |> root_layout.wrap(\"" <> type_name <> "\")
           |> wisp.html_response(200)
       }
   }
