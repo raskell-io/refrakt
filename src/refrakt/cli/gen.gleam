@@ -72,10 +72,17 @@ pub fn resource(name: String, raw_args: List(String)) {
   let app = project.app_name()
   let db = project.detect_db()
   let api_mode = list.contains(raw_args, "--api")
+  let belongs_to = extract_flag_value(raw_args, "--belongs-to")
   let raw_fields = list.filter(raw_args, fn(a) { !string.starts_with(a, "--") })
   let singular = singularize(name)
   let type_name = capitalize(singular)
-  let fields = parse_fields(raw_fields)
+
+  // Add foreign key field if --belongs-to is set
+  let extra_fields = case belongs_to {
+    Ok(parent) -> [#(singularize(parent) <> "_id", "int")]
+    Error(_) -> []
+  }
+  let fields = list.append(parse_fields(raw_fields), extra_fields)
 
   // Paths
   let handler_path = "src/" <> app <> "/web/" <> singular <> "_handler.gleam"
@@ -2323,6 +2330,14 @@ fn capitalize(s: String) -> String {
   case string.pop_grapheme(s) {
     Ok(#(first, rest)) -> string.uppercase(first) <> rest
     Error(_) -> s
+  }
+}
+
+fn extract_flag_value(args: List(String), flag: String) -> Result(String, Nil) {
+  case args {
+    [] -> Error(Nil)
+    [f, value, ..] if f == flag -> Ok(value)
+    [_, ..rest] -> extract_flag_value(rest, flag)
   }
 }
 

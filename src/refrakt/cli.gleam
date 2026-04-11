@@ -5,12 +5,14 @@
 import argv
 import gleam/io
 import gleam/string
+import refrakt/cli/assets
 import refrakt/cli/build
 import refrakt/cli/dev
 import refrakt/cli/gen
 import refrakt/cli/migrate_cmd
 import refrakt/cli/new
 import refrakt/cli/routes
+import refrakt/cli/seed
 
 pub fn main() {
   case argv.load().arguments {
@@ -24,10 +26,14 @@ pub fn main() {
     ["routes", ..] -> routes.run()
     ["migrate", ..] -> migrate_cmd.run()
     ["build", ..] -> build.run()
+    ["assets", "setup", ..] -> assets.setup()
+    ["assets", "build", ..] -> assets.build()
+    ["assets", ..] -> assets.setup()
+    ["seed", ..] -> seed.run()
     ["dev", ..] -> dev.run()
     ["help", ..] | ["--help", ..] | ["-h", ..] -> print_help()
     ["version", ..] | ["--version", ..] | ["-v", ..] ->
-      io.println("refrakt 0.1.0")
+      io.println("refrakt 0.2.0")
     [cmd, ..] -> {
       io.println("Unknown command: " <> cmd)
       io.println("")
@@ -51,6 +57,8 @@ fn print_help() {
       "",
       "  gen page <name>                   Generate a page (handler + route)",
       "  gen resource <name> <fields...>   Generate CRUD resource",
+      "    --api                           JSON API mode (no views)",
+      "    --belongs-to <parent>           Add foreign key to parent",
       "  gen migration <name>              Generate a SQL migration file",
       "  gen auth                          Generate starter authentication",
       "  gen island <name>                 Generate a Lustre interactive island",
@@ -58,7 +66,10 @@ fn print_help() {
       "",
       "  routes                            Print the route table",
       "  migrate                           Run pending migrations",
+      "  seed                              Run database seeds",
       "  build                             Compile Lustre islands to JS",
+      "  assets setup                      Set up Tailwind CSS",
+      "  assets build                      Build CSS/JS assets",
       "  dev                               Start the dev server",
       "",
       "  help                              Show this help",
@@ -66,7 +77,6 @@ fn print_help() {
       "",
       "Field types for gen resource:",
       "  string, text, int, float, bool, date, datetime",
-      "  optional(string), optional(int), etc.",
       "",
       "Examples:",
       "  refrakt new my_app --db postgres",
