@@ -1,0 +1,19 @@
+name = "refrakt_cli"
+version = "0.4.0"
+target = "erlang"
+description = "Code generator for Refrakt, a convention-first web framework for Gleam"
+licences = ["MIT"]
+repository = { type = "github", user = "raskell-io", repo = "refrakt", path = "packages/refrakt_cli" }
+links = [
+  { title = "CLI reference", href = "https://github.com/raskell-io/refrakt/blob/main/docs/cli.md" },
+]
+gleam = ">= 1.14.0"
+
+[dependencies]
+gleam_stdlib = ">= 0.70.0 and < 2.0.0"
+argv = ">= 1.1.0 and < 2.0.0"
+simplifile = ">= 2.7.0 and < 3.0.0"
+tom = ">= 2.1.0 and < 3.0.0"
+
+[dev-dependencies]
+gleeunit = ">= 1.11.0 and < 2.0.0"

@@ -1,0 +1,2583 @@
+//// Code generators: page, resource, migration, auth.
+////
+
+import gleam/int
+import gleam/io
+import gleam/list
+import gleam/string
+import refrakt_cli/format
+import refrakt_cli/project
+import refrakt_cli/templates
+import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
+import simplifile
+
+// =============================================================================
+// gen page
+// =============================================================================
+
+pub fn page(name: String) {
+  let app = project.app_name()
+
+  let handler_path = "src/" <> app <> "/web/" <> name <> "_handler.gleam"
+  let test_path = "test/" <> app <> "/web/" <> name <> "_handler_test.gleam"
+
+  // Create handler
+  let handler_content = "import " <> app <> "/context.{type Context}
+import " <> app <> "/web/layouts/root_layout
+import lustre/attribute.{class}
+import lustre/element.{text}
+import lustre/element/html.{h1, section}
+import wisp.{type Request, type Response}
+
+pub fn index(_req: Request, _ctx: Context) -> Response {
+  section([class(\"" <> name <> "\")], [
+    h1([], [text(\"" <> capitalize(name) <> "\")]),
+  ])
+  |> root_layout.wrap(\"" <> capitalize(name) <> "\")
+  |> wisp.html_response(200)
+}
+"
+
+  let test_content =
+    "import gleeunit/should
+
+pub fn placeholder_test() {
+  1 + 1
+  |> should.equal(2)
+}
+"
+
+  let assert Ok(_) = simplifile.write(handler_path, handler_content)
+  ensure_dir_for(test_path)
+  let assert Ok(_) = simplifile.write(test_path, test_content)
+
+  // Patch router and format
+  let _ = patch_router_page(app, name)
+  let router_path = "src/" <> app <> "/router.gleam"
+  format.format_files([handler_path, test_path, router_path])
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> handler_path)
+  io.println("  " <> test_path)
+  io.println("")
+  io.println("Updated:")
+  io.println("  " <> router_path)
+}
+
+// =============================================================================
+// gen resource
+// =============================================================================
+
+pub fn resource(name: String, raw_args: List(String)) {
+  case project.detect_db() {
+    NoDb -> {
+      io.println("No database configured.")
+      io.println(
+        "gen resource generates a repo and a migration. Create a project with --db postgres or --db sqlite.",
+      )
+    }
+    db -> resource_with_db(name, raw_args, db)
+  }
+}
+
+fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
+  let app = project.app_name()
+  let api_mode = list.contains(raw_args, "--api")
+  let belongs_to = extract_flag_value(raw_args, "--belongs-to")
+  let raw_fields = list.filter(raw_args, fn(a) { !string.starts_with(a, "--") })
+  let singular = singularize(name)
+  let type_name = capitalize(singular)
+
+  // Add foreign key field if --belongs-to is set
+  let extra_fields = case belongs_to {
+    Ok(parent) -> [#(singularize(parent) <> "_id", "int")]
+    Error(_) -> []
+  }
+  let fields = list.append(parse_fields(raw_fields), extra_fields)
+
+  // Paths
+  let handler_path = "src/" <> app <> "/web/" <> singular <> "_handler.gleam"
+  let views_path = "src/" <> app <> "/web/" <> singular <> "_views.gleam"
+  let form_path = "src/" <> app <> "/web/forms/" <> singular <> "_form.gleam"
+  let domain_path = "src/" <> app <> "/domain/" <> singular <> ".gleam"
+  let repo_path = "src/" <> app <> "/data/" <> singular <> "_repo.gleam"
+  let migration_path =
+    "src/"
+    <> app
+    <> "/data/migrations/"
+    <> next_migration_number(app)
+    <> "_create_"
+    <> name
+    <> ".sql"
+  let test_path = "test/" <> app <> "/web/" <> singular <> "_handler_test.gleam"
+
+  // Ensure directories
+  list.each(
+    [
+      "src/" <> app <> "/web/forms",
+      "src/" <> app <> "/domain",
+      "src/" <> app <> "/data",
+      "src/" <> app <> "/data/migrations",
+      "test/" <> app <> "/web",
+    ],
+    fn(dir) {
+      let _ = simplifile.create_directory_all(dir)
+    },
+  )
+
+  // Generate files
+  let first_field = case fields {
+    [#(name, _), ..] -> name
+    [] -> "id"
+  }
+
+  let gleam_fields =
+    list.map(fields, fn(f) {
+      let #(field_name, field_type) = f
+      #(field_name, to_gleam_type(field_type))
+    })
+
+  // Generate handler (HTML or JSON)
+  let assert Ok(_) = case api_mode {
+    True ->
+      simplifile.write(
+        handler_path,
+        api_resource_handler(app, name, singular, type_name, db, fields),
+      )
+    False ->
+      simplifile.write(
+        handler_path,
+        templates.resource_handler(
+          app,
+          name,
+          singular,
+          type_name,
+          first_field,
+          db,
+        ),
+      )
+  }
+
+  // Views and forms: full for HTML, params-only for API
+  let created_paths = case api_mode {
+    False -> {
+      let assert Ok(_) =
+        simplifile.write(
+          views_path,
+          resource_views(app, name, singular, type_name, fields),
+        )
+      let assert Ok(_) =
+        simplifile.write(
+          form_path,
+          resource_form(app, singular, type_name, fields),
+        )
+      [handler_path, views_path, form_path, domain_path, repo_path, test_path]
+    }
+    True -> {
+      // API mode still needs the Params type for repos
+      let assert Ok(_) =
+        simplifile.write(
+          form_path,
+          api_params_module(app, singular, type_name, fields),
+        )
+      [handler_path, form_path, domain_path, repo_path, test_path]
+    }
+  }
+
+  let assert Ok(_) =
+    simplifile.write(
+      domain_path,
+      templates.resource_domain_type(type_name, gleam_fields),
+    )
+
+  let assert Ok(_) =
+    simplifile.write(
+      repo_path,
+      resource_repo(app, singular, type_name, fields, db),
+    )
+
+  let assert Ok(_) =
+    simplifile.write(migration_path, resource_migration(name, fields, db))
+
+  let assert Ok(_) =
+    simplifile.write(test_path, case api_mode {
+      True -> api_resource_test(app, singular)
+      False -> resource_test(app, singular, type_name, fields)
+    })
+
+  // Patch router and format
+  let _ = case api_mode {
+    True -> patch_router_api_resource(app, name, singular)
+    False -> patch_router_resource(app, name, singular)
+  }
+  let router_path = "src/" <> app <> "/router.gleam"
+  format.format_files([router_path, ..created_paths])
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> handler_path)
+  case api_mode {
+    False -> {
+      io.println("  " <> views_path)
+      io.println("  " <> form_path)
+    }
+    True -> Nil
+  }
+  io.println("  " <> domain_path)
+  io.println("  " <> repo_path)
+  io.println("  " <> migration_path)
+  io.println("  " <> test_path)
+  io.println("")
+  io.println("Updated:")
+  io.println("  " <> router_path)
+}
+
+// =============================================================================
+// gen migration
+// =============================================================================
+
+pub fn migration(name: String) {
+  let app = project.app_name()
+  let dir = "src/" <> app <> "/data/migrations"
+  let _ = simplifile.create_directory_all(dir)
+
+  let number = next_migration_number(app)
+  let filename = number <> "_" <> name <> ".sql"
+  let path = dir <> "/" <> filename
+
+  let content = "-- Migration: " <> name <> "\n-- Created: " <> number <> "\n\n"
+
+  let assert Ok(_) = simplifile.write(path, content)
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> path)
+}
+
+// =============================================================================
+// gen auth
+// =============================================================================
+
+pub fn auth() {
+  case project.detect_db() {
+    NoDb -> {
+      io.println("No database configured.")
+      io.println(
+        "gen auth stores users in a database. Create a project with --db postgres or --db sqlite.",
+      )
+    }
+    db -> auth_with_db(db)
+  }
+}
+
+/// The argus (Argon2) version range `gen auth` adds to gleam.toml.
+const argus_requirement = ">= 2.0.0 and < 3.0.0"
+
+fn auth_with_db(db: DbChoice) {
+  let app = project.app_name()
+
+  // Ensure directories
+  list.each(
+    [
+      "src/" <> app <> "/web/forms",
+      "src/" <> app <> "/web/middleware",
+      "src/" <> app <> "/domain",
+      "src/" <> app <> "/data",
+      "src/" <> app <> "/data/migrations",
+      "test/" <> app <> "/web",
+    ],
+    fn(dir) {
+      let _ = simplifile.create_directory_all(dir)
+    },
+  )
+
+  let files = [
+    #("src/" <> app <> "/domain/user.gleam", auth_user_type()),
+    #("src/" <> app <> "/domain/auth.gleam", auth_domain(app)),
+    #("src/" <> app <> "/data/user_repo.gleam", auth_user_repo(app, db)),
+    #(
+      "src/"
+        <> app
+        <> "/data/migrations/"
+        <> next_migration_number(app)
+        <> "_create_users.sql",
+      auth_migration(db),
+    ),
+    #("src/" <> app <> "/web/forms/auth_form.gleam", auth_form(app)),
+    #("src/" <> app <> "/web/auth_handler.gleam", auth_handler(app, db)),
+    #("src/" <> app <> "/web/auth_views.gleam", auth_views(app)),
+    #("src/" <> app <> "/web/middleware/auth.gleam", auth_middleware(app, db)),
+    #("test/" <> app <> "/web/auth_handler_test.gleam", auth_test(app)),
+  ]
+
+  list.each(files, fn(file) {
+    let #(path, content) = file
+    let assert Ok(_) = simplifile.write(path, content)
+  })
+
+  // Passwords are hashed with Argon2 from the argus package
+  let added_argus = project.add_dependency("argus", argus_requirement)
+
+  // Patch router and format
+  let _ = patch_router_auth(app)
+  let router_path = "src/" <> app <> "/router.gleam"
+  let gleam_paths =
+    list.filter_map(files, fn(file) {
+      case string.ends_with(file.0, ".gleam") {
+        True -> Ok(file.0)
+        False -> Error(Nil)
+      }
+    })
+  format.format_files([router_path, ..gleam_paths])
+
+  io.println("")
+  io.println("Created:")
+  list.each(files, fn(file) { io.println("  " <> file.0) })
+  io.println("")
+  io.println("Updated:")
+  io.println("  src/" <> app <> "/router.gleam")
+  case added_argus {
+    True -> io.println("  gleam.toml (added argus for Argon2 password hashing)")
+    False -> Nil
+  }
+}
+
+// =============================================================================
+// gen live
+// =============================================================================
+
+pub fn live(name: String) {
+  let app = project.app_name()
+
+  let live_dir = "src/" <> app <> "/web/live"
+  let _ = simplifile.create_directory_all(live_dir)
+
+  let component_path = live_dir <> "/" <> name <> ".gleam"
+  let socket_path = live_dir <> "/" <> name <> "_socket.gleam"
+  let handler_path = "src/" <> app <> "/web/" <> name <> "_live_handler.gleam"
+
+  let assert Ok(_) = simplifile.write(component_path, live_component(app, name))
+  let assert Ok(_) = simplifile.write(socket_path, live_socket(app, name))
+  let assert Ok(_) = simplifile.write(handler_path, live_handler(app, name))
+
+  // Patch router
+  let _ = patch_router_live(app, name)
+  let router_path = "src/" <> app <> "/router.gleam"
+  format.format_files([component_path, socket_path, handler_path, router_path])
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> component_path)
+  io.println("  " <> socket_path)
+  io.println("  " <> handler_path)
+  io.println("")
+  io.println("Updated:")
+  io.println("  " <> router_path)
+  io.println("")
+  io.println("The live component runs on the server and patches the DOM")
+  io.println("over WebSocket. Visit /" <> name <> " to see it in action.")
+}
+
+fn live_component(_app: String, name: String) -> String {
+  let type_name = capitalize(name)
+
+  "/// " <> type_name <> " — a Lustre server component.
+///
+/// This component runs on the server. UI updates are sent to the
+/// browser over WebSocket. The client runtime (~10kb) patches the DOM.
+///
+import gleam/int
+import lustre
+import lustre/effect
+import lustre/element.{text}
+import lustre/element/html.{button, div, h1, p}
+import lustre/event
+
+pub type Model {
+  Model(count: Int)
+}
+
+pub type Msg {
+  Increment
+  Decrement
+}
+
+pub fn init(_flags: Nil) -> #(Model, effect.Effect(Msg)) {
+  #(Model(count: 0), effect.none())
+}
+
+pub fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
+  case msg {
+    Increment -> #(Model(count: model.count + 1), effect.none())
+    Decrement -> #(Model(count: model.count - 1), effect.none())
+  }
+}
+
+pub fn view(model: Model) -> element.Element(Msg) {
+  div([], [
+    h1([], [text(\"" <> type_name <> "\")]),
+    div([], [
+      button([event.on_click(Decrement)], [text(\"-\")]),
+      p([], [text(int.to_string(model.count))]),
+      button([event.on_click(Increment)], [text(\"+\")]),
+    ]),
+  ])
+}
+
+/// Create a Lustre application for server-side rendering.
+pub fn app() {
+  lustre.application(init, update, view)
+}
+"
+}
+
+fn live_socket(app: String, name: String) -> String {
+  "/// WebSocket transport for the " <> name <> " server component.
+///
+/// This module handles the WebSocket connection between the Lustre
+/// server component and the browser client runtime.
+///
+/// ## Setup
+///
+/// 1. Add the WebSocket route to router.gleam. Because WebSocket
+///    upgrades bypass Wisp, handle it before the Wisp handler in
+///    your main module:
+///
+///    ```gleam
+///    // In src/<app>.gleam, before the wisp_mist.handler:
+///    import " <> app <> "/web/live/" <> name <> "_socket
+///
+///    // In the mist handler, check for WS upgrade:
+///    fn handle(req) {
+///      case request.path_segments(req) {
+///        [\"" <> name <> "\", \"ws\"] -> " <> name <> "_socket.upgrade(req)
+///        _ -> wisp_handler(req)
+///      }
+///    }
+///    ```
+///
+/// 2. Start a Lustre factory supervisor in your main module to
+///    manage server component instances.
+///
+/// See: https://hexdocs.pm/lustre/lustre/server_component.html
+///
+import gleam/erlang/process
+import gleam/http/request.{type Request}
+import gleam/http/response
+import gleam/json
+import gleam/option.{None}
+import lustre/server_component
+import mist.{type Connection, type ResponseData}
+
+/// WebSocket connection state.
+pub type State {
+  State
+}
+
+/// Upgrade an HTTP request to a WebSocket for the server component.
+pub fn upgrade(
+  req: Request(Connection),
+) -> response.Response(ResponseData) {
+  mist.websocket(
+    request: req,
+    handler: fn(state, msg, conn) {
+      case msg {
+        mist.Text(text) -> {
+          // Decode event from client and dispatch to server runtime
+          // TODO: wire to your Lustre runtime Subject
+          // case json.parse(text, server_component.runtime_message_decoder()) {
+          //   Ok(runtime_msg) -> process.send(runtime, runtime_msg)
+          //   Error(_) -> Nil
+          // }
+          mist.continue(state)
+        }
+        mist.Binary(_) -> mist.continue(state)
+        mist.Custom(_) -> mist.continue(state)
+        mist.Closed | mist.Shutdown -> mist.stop()
+      }
+    },
+    on_init: fn(_conn) {
+      // TODO: Start a Lustre server component instance here.
+      // Use lustre.supervised() or lustre.factory() to create
+      // a managed runtime, then register a callback to send
+      // patches over the WebSocket:
+      //
+      // server_component.register_callback(fn(msg) {
+      //   let patch = server_component.client_message_to_json(msg)
+      //   mist.send_text_frame(conn, json.to_string(patch))
+      // })
+      #(State, None)
+    },
+    on_close: fn(_state) { Nil },
+  )
+}
+"
+}
+
+fn live_handler(app: String, name: String) -> String {
+  let type_name = capitalize(name)
+
+  "/// Handler for the " <> name <> " live page.
+///
+/// Serves the HTML shell that mounts the Lustre server component
+/// via the <lustre-server-component> custom element over WebSocket.
+///
+import " <> app <> "/context.{type Context}
+import " <> app <> "/web/layouts/root_layout
+import lustre/attribute
+import lustre/element.{text}
+import lustre/element/html.{div, section}
+import lustre/server_component
+import wisp.{type Request, type Response}
+
+pub fn index(_req: Request, _ctx: Context) -> Response {
+  section([], [
+    // Inline the Lustre server component client runtime
+    server_component.script(),
+    // Mount the server component, connecting via WebSocket
+    server_component.element(
+      [
+        server_component.route(\"/" <> name <> "/ws\"),
+        server_component.method(server_component.WebSocket),
+      ],
+      [text(\"Loading " <> type_name <> "...\")],
+    ),
+  ])
+  |> root_layout.wrap(\"" <> type_name <> "\")
+  |> wisp.html_response(200)
+}
+"
+}
+
+fn patch_router_live(app: String, name: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  let handler_import = "import " <> app <> "/web/" <> name <> "_live_handler"
+  let content = add_import(content, handler_import)
+
+  let socket_import = "import " <> app <> "/web/live/" <> name <> "_socket"
+  let content = add_import(content, socket_import)
+
+  let routes =
+    "\n    [\""
+    <> name
+    <> "\"], http.Get -> "
+    <> name
+    <> "_live_handler.index(req, ctx)"
+
+  let content = add_route(content, routes)
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+// =============================================================================
+// gen island
+// =============================================================================
+
+pub fn island(name: String) {
+  let app = project.app_name()
+
+  let island_dir = "src/" <> app <> "/web/islands"
+  let _ = simplifile.create_directory_all(island_dir)
+
+  let island_path = island_dir <> "/" <> name <> ".gleam"
+  let embed_path = island_dir <> "/" <> name <> "_embed.gleam"
+
+  let assert Ok(_) = simplifile.write(island_path, island_module(name))
+  let assert Ok(_) = simplifile.write(embed_path, island_embed(app, name))
+  format.format_files([island_path, embed_path])
+
+  io.println("")
+  io.println("Created:")
+  io.println("  " <> island_path)
+  io.println("  " <> embed_path)
+  io.println("")
+  io.println("Usage in a view:")
+  io.println("  import " <> app <> "/web/islands/" <> name <> "_embed")
+  io.println("  " <> name <> "_embed.render()")
+  io.println("  " <> name <> "_embed.script_tag()")
+  io.println("")
+  io.println("Build the island JS:")
+  io.println("  gleam build --target javascript")
+}
+
+fn island_module(name: String) -> String {
+  "/// Interactive island: " <> name <> "
+///
+/// This is a Lustre client-side app. Compile to JavaScript with:
+///   gleam build --target javascript
+///
+import gleam/int
+import lustre
+import lustre/element.{text}
+import lustre/element/html.{button, div, p}
+import lustre/event
+
+pub type Model {
+  Model(count: Int)
+}
+
+pub type Msg {
+  Increment
+  Decrement
+}
+
+pub fn init(_flags: Nil) -> Model {
+  Model(count: 0)
+}
+
+pub fn update(model: Model, msg: Msg) -> Model {
+  case msg {
+    Increment -> Model(count: model.count + 1)
+    Decrement -> Model(count: model.count - 1)
+  }
+}
+
+pub fn view(model: Model) -> element.Element(Msg) {
+  div([], [
+    button([event.on_click(Decrement)], [text(\"-\")]),
+    p([], [text(int.to_string(model.count))]),
+    button([event.on_click(Increment)], [text(\"+\")]),
+  ])
+}
+
+pub fn main() {
+  let app = lustre.simple(init, update, view)
+  let assert Ok(_) = lustre.start(app, \"#" <> name <> "\", Nil)
+}
+"
+}
+
+fn island_embed(_app: String, name: String) -> String {
+  "/// Server-side helper to embed the " <> name <> " island in a view.
+///
+import lustre/attribute.{id, src}
+import lustre/element.{type Element, text}
+import lustre/element/html.{div, script}
+
+/// Render the mount point for the island.
+pub fn render() -> Element(Nil) {
+  div([id(\"" <> name <> "\")], [text(\"Loading...\")])
+}
+
+/// Render the script tag that loads the island JS.
+pub fn script_tag() -> Element(Nil) {
+  script([src(\"/static/js/islands/" <> name <> ".js\")], \"\")
+}
+"
+}
+
+// =============================================================================
+// Resource template helpers
+// =============================================================================
+
+fn api_params_module(
+  _app_name: String,
+  _resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let params_field_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(name, ft) = f
+      "    " <> name <> ": " <> to_gleam_type(ft) <> ","
+    })
+    |> string.join("\n")
+
+  "/// Params type for " <> type_name <> " (API mode).
+///
+pub type " <> type_name <> "Params {
+  " <> type_name <> "Params(
+" <> params_field_defs <> "
+  )
+}
+"
+}
+
+fn api_resource_handler(
+  app_name: String,
+  _resource_plural: String,
+  resource_singular: String,
+  type_name: String,
+  db: DbChoice,
+  fields: List(#(String, String)),
+) -> String {
+  let db_arg = case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
+
+  // Build JSON object fields for serialization
+  let json_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(name, field_type) = f
+      let json_fn = case field_type {
+        "int" -> "json.int"
+        "float" -> "json.float"
+        "bool" -> "json.bool"
+        _ -> "json.string"
+      }
+      "      #(\"" <> name <> "\", " <> json_fn <> "(item." <> name <> ")),"
+    })
+    |> string.join("\n")
+
+  let to_json =
+    "fn to_json(item: "
+    <> resource_singular
+    <> ".type_placeholder) -> json.Json {
+  json.object([
+    #(\"id\", json.int(item.id)),
+"
+    <> json_fields
+    <> "
+  ])
+}"
+
+  // Fix the type placeholder
+  let to_json = string.replace(to_json, "type_placeholder", type_name)
+
+  let extra_imports = case list.any(fields, fn(f) { f.1 == "float" }) {
+    True -> "\nimport gleam/float"
+    False -> ""
+  }
+
+  "import gleam/int" <> extra_imports <> "
+import gleam/json
+import " <> app_name <> "/context.{type Context}
+import " <> app_name <> "/data/" <> resource_singular <> "_repo
+import " <> app_name <> "/domain/" <> resource_singular <> "
+import wisp.{type Request, type Response}
+
+pub fn index(_req: Request, ctx: Context) -> Response {
+  let items = " <> resource_singular <> "_repo.list(" <> db_arg <> ")
+  let body =
+    json.array(items, to_json)
+    |> json.to_string
+  wisp.json_response(body, 200)
+}
+
+pub fn show(req: Request, ctx: Context, id: String) -> Response {
+  case int.parse(id) {
+    Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
+    Ok(id) ->
+      case " <> resource_singular <> "_repo.get(" <> db_arg <> ", id) {
+        Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
+        Ok(item) -> {
+          wisp.json_response(json.to_string(to_json(item)), 200)
+        }
+      }
+  }
+}
+
+pub fn create(req: Request, ctx: Context) -> Response {
+  use _json_body <- wisp.require_json(req)
+  // TODO: decode JSON body into " <> type_name <> "Params and create
+  wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
+}
+
+pub fn update(req: Request, ctx: Context, id: String) -> Response {
+  use _json_body <- wisp.require_json(req)
+  // TODO: decode JSON body into " <> type_name <> "Params and update
+  wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
+}
+
+pub fn delete(req: Request, ctx: Context, id: String) -> Response {
+  case int.parse(id) {
+    Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
+    Ok(id) -> {
+      let _ = " <> resource_singular <> "_repo.delete(" <> db_arg <> ", id)
+      wisp.json_response(\"{\\\"ok\\\":true}\", 200)
+    }
+  }
+}
+
+" <> to_json <> "
+"
+}
+
+fn resource_views(
+  app_name: String,
+  resource_plural: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let first_field = case fields {
+    [#(name, _), ..] -> name
+    [] -> "id"
+  }
+
+  let form_field_elements =
+    fields
+    |> list.map(fn(f) {
+      let #(fname, ftype) = f
+      let label_text = capitalize(fname)
+      case ftype {
+        "bool" -> "      div([class(\"field\")], [
+        label([], [
+          input([type_(\"checkbox\"), name(\"" <> fname <> "\"), attribute.checked(values." <> fname <> ")]),
+          text(\" " <> label_text <> "\"),
+        ]),
+      ]),"
+        "text" -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        textarea([name(\"" <> fname <> "\")], values." <> fname <> "),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+        "int" -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        input([type_(\"number\"), name(\"" <> fname <> "\"), value(int.to_string(values." <> fname <> "))]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+        "float" -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        input([type_(\"number\"), name(\"" <> fname <> "\"), value(float.to_string(values." <> fname <> "))]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+        _ -> "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        input([type_(\"text\"), name(\"" <> fname <> "\"), value(values." <> fname <> ")]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+      }
+    })
+    |> string.join("\n")
+
+  let float_import = case list.any(fields, fn(f) { f.1 == "float" }) {
+    True -> "\nimport gleam/float"
+    False -> ""
+  }
+
+  // Import only what the field elements use: an unused import would be
+  // a warning in the generated module. `text` fields render a textarea,
+  // every other type an input; only int, float and string-like inputs
+  // set a value.
+  let uses = fn(predicate: fn(String) -> Bool) {
+    list.any(fields, fn(f) { predicate(f.1) })
+  }
+  let attribute_imports =
+    ["class", "href", "name", "type_"]
+    |> append_if(uses(fn(t) { t != "text" && t != "bool" }), "value")
+  let html_imports =
+    ["a", "button", "div", "form", "h1"]
+    |> append_if(uses(fn(t) { t != "text" }), "input")
+    |> list.append(["label", "li", "p", "section"])
+    |> append_if(uses(fn(t) { t == "text" }), "textarea")
+    |> list.append(["ul"])
+
+  "import gleam/int" <> float_import <> "
+import gleam/list
+import gleam/option
+import lustre/attribute.{" <> string.join(attribute_imports, ", ") <> "}
+import lustre/element.{type Element, text}
+import lustre/element/html.{" <> string.join(html_imports, ", ") <> "}
+import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
+import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
+
+pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
+  section([class(\"" <> resource_plural <> "\")], [
+    div([class(\"header\")], [
+      h1([], [text(\"" <> type_name <> "s\")]),
+      a([href(\"/" <> resource_plural <> "/new\"), class(\"btn\")], [text(\"New " <> type_name <> "\")]),
+    ]),
+    ul(
+      [class(\"post-list\")],
+      list.map(items, fn(item) {
+        li([], [
+          a([href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id))], [
+            text(item." <> first_field <> "),
+          ]),
+        ])
+      }),
+    ),
+  ])
+}
+
+pub fn show_view(item: " <> type_name <> ") -> Element(Nil) {
+  section([class(\"" <> resource_singular <> "\")], [
+    h1([], [text(item." <> first_field <> ")]),
+    div([class(\"actions\")], [
+      a(
+        [
+          href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id) <> \"/edit\"),
+          class(\"btn\"),
+        ],
+        [text(\"Edit\")],
+      ),
+      // wisp.method_override reads the method from the _method query
+      // parameter of a POST, so this form sends a DELETE.
+      form(
+        [
+          attribute.action(
+            \"/" <> resource_plural <> "/\" <> int.to_string(item.id) <> \"?_method=DELETE\",
+          ),
+          attribute.method(\"post\"),
+        ],
+        [button([type_(\"submit\"), class(\"btn\")], [text(\"Delete\")])],
+      ),
+    ]),
+  ])
+}
+
+pub fn form_view(
+  values: " <> resource_singular <> "_form." <> type_name <> "Form,
+  errors: List(#(String, String)),
+) -> Element(Nil) {
+  // Updates are sent as POST /<id>?_method=PUT: wisp.method_override
+  // reads the method from the _method query parameter.
+  let post_action = case values.id {
+    option.Some(id) -> \"/" <> resource_plural <> "/\" <> int.to_string(id) <> \"?_method=PUT\"
+    option.None -> \"/" <> resource_plural <> "\"
+  }
+
+  section([class(\"" <> resource_singular <> "-form\")], [
+    h1([], [text(case values.id {
+      option.Some(_) -> \"Edit " <> type_name <> "\"
+      option.None -> \"New " <> type_name <> "\"
+    })]),
+    form([attribute.action(post_action), attribute.method(\"post\")], [
+" <> form_field_elements <> "
+      button([type_(\"submit\"), class(\"btn\")], [text(\"Save\")]),
+    ]),
+  ])
+}
+
+fn field_error(
+  errors: List(#(String, String)),
+  field: String,
+) -> Element(Nil) {
+  case list.find(errors, fn(e) { e.0 == field }) {
+    Ok(#(_, message)) -> p([class(\"error\")], [text(message)])
+    Error(_) -> text(\"\")
+  }
+}
+"
+}
+
+fn resource_form(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let form_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(field_name, field_type) = f
+      "    " <> field_name <> ": " <> form_default_value(field_type) <> ","
+    })
+    |> string.join("\n")
+
+  let form_field_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(name, ft) = f
+      "    " <> name <> ": " <> to_gleam_type(ft) <> ","
+    })
+    |> string.join("\n")
+
+  let params_field_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(name, ft) = f
+      "    " <> name <> ": " <> to_gleam_type(ft) <> ","
+    })
+    |> string.join("\n")
+
+  let from_form_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(field_name, field_type) = f
+      case field_type {
+        "bool" ->
+          "    "
+          <> field_name
+          <> ": list.any(data.values, fn(v) { v.0 == \""
+          <> field_name
+          <> "\" }),"
+        "int" ->
+          "    "
+          <> field_name
+          <> ": result.unwrap(int.parse(get_value(data, \""
+          <> field_name
+          <> "\")), 0),"
+        "float" ->
+          "    "
+          <> field_name
+          <> ": result.unwrap(float.parse(get_value(data, \""
+          <> field_name
+          <> "\")), 0.0),"
+        _ ->
+          "    " <> field_name <> ": get_value(data, \"" <> field_name <> "\"),"
+      }
+    })
+    |> string.join("\n")
+
+  let from_record_fields =
+    fields
+    |> list.map(fn(f) {
+      let #(name, _) = f
+      "    " <> name <> ": item." <> name <> ","
+    })
+    |> string.join("\n")
+
+  let decode_lets =
+    fields
+    |> list.filter(fn(f) { f.1 != "bool" })
+    |> list.map(fn(f) {
+      let #(name, _) = f
+      "  let " <> name <> " = get_value(data, \"" <> name <> "\")"
+    })
+    |> string.join("\n")
+
+  let validation_lines =
+    fields
+    |> list.filter(fn(f) {
+      let #(_, t) = f
+      t == "string" || t == "text"
+    })
+    |> list.map(fn(f) {
+      let #(name, _) = f
+      "    |> validate.required("
+      <> name
+      <> ", \""
+      <> name
+      <> "\", \""
+      <> capitalize(name)
+      <> " is required\")"
+    })
+    |> string.join("\n")
+
+  let params_construction =
+    fields
+    |> list.map(fn(f) {
+      let #(name, t) = f
+      case t {
+        "bool" ->
+          "        "
+          <> name
+          <> ": list.any(data.values, fn(v) { v.0 == \""
+          <> name
+          <> "\" }),"
+        "int" ->
+          "        " <> name <> ": result.unwrap(int.parse(" <> name <> "), 0),"
+        "float" ->
+          "        "
+          <> name
+          <> ": result.unwrap(float.parse("
+          <> name
+          <> "), 0.0),"
+        _ -> "        " <> name <> ": " <> name <> ","
+      }
+    })
+    |> string.join("\n")
+
+  let extra_imports = case
+    list.any(fields, fn(f) { f.1 == "int" }),
+    list.any(fields, fn(f) { f.1 == "float" })
+  {
+    True, True -> "\nimport gleam/int\nimport gleam/float"
+    True, False -> "\nimport gleam/int"
+    False, True -> "\nimport gleam/float"
+    False, False -> ""
+  }
+
+  "import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result" <> extra_imports <> "
+import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
+import refrakt/validate
+import wisp
+
+pub type " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: Option(Int),
+" <> form_field_defs <> "
+  )
+}
+
+pub type " <> type_name <> "Params {
+  " <> type_name <> "Params(
+" <> params_field_defs <> "
+  )
+}
+
+pub fn empty() -> " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: None,
+" <> form_fields <> "
+  )
+}
+
+pub fn from_" <> resource_singular <> "(item: " <> type_name <> ") -> " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: Some(item.id),
+" <> from_record_fields <> "
+  )
+}
+
+pub fn from_form_data(data: wisp.FormData) -> " <> type_name <> "Form {
+  " <> type_name <> "Form(
+    id: None,
+" <> from_form_fields <> "
+  )
+}
+
+pub fn decode(
+  data: wisp.FormData,
+) -> Result(" <> type_name <> "Params, List(#(String, String))) {
+" <> decode_lets <> "
+
+  let errors =
+    []
+" <> validation_lines <> "
+
+  case errors {
+    [] ->
+      Ok(" <> type_name <> "Params(
+" <> params_construction <> "
+      ))
+    _ -> Error(errors)
+  }
+}
+
+fn get_value(data: wisp.FormData, key: String) -> String {
+  list.find(data.values, fn(v) { v.0 == key })
+  |> result.map(fn(v) { v.1 })
+  |> result.unwrap(\"\")
+}
+"
+}
+
+fn resource_repo(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  db: DbChoice,
+) -> String {
+  case db {
+    Sqlite | NoDb ->
+      resource_repo_sqlite(app_name, resource_singular, type_name, fields)
+    Postgres ->
+      resource_repo_pog(app_name, resource_singular, type_name, fields)
+  }
+}
+
+fn resource_repo_sqlite(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let table = resource_singular <> "s"
+  let field_names = list.map(fields, fn(f) { f.0 }) |> string.join(", ")
+  let select_fields = "id, " <> field_names
+  let q = "\""
+
+  let decoder_fields =
+    fields
+    |> list.index_map(fn(f, i) {
+      let #(name, field_type) = f
+      let decode_fn = case field_type {
+        "bool" -> "sqlight.decode_bool()"
+        "int" -> "decode.int"
+        "float" -> "decode.float"
+        _ -> "decode.string"
+      }
+      "  use "
+      <> name
+      <> " <- decode.field("
+      <> int.to_string(i + 1)
+      <> ", "
+      <> decode_fn
+      <> ")"
+    })
+    |> string.join("\n")
+
+  let constructor_args =
+    fields
+    |> list.map(fn(f) { f.0 <> ": " <> f.0 })
+    |> string.join(", ")
+
+  let insert_placeholders =
+    fields
+    |> list.index_map(fn(_, _i) { "?" })
+    |> string.join(", ")
+
+  let insert_params =
+    fields
+    |> list.map(fn(f) {
+      let #(name, field_type) = f
+      let sq_fn = case field_type {
+        "bool" -> "sqlight.bool"
+        "int" -> "sqlight.int"
+        "float" -> "sqlight.float"
+        _ -> "sqlight.text"
+      }
+      "    " <> sq_fn <> "(params." <> name <> "),"
+    })
+    |> string.join("\n")
+
+  let update_sets =
+    fields
+    |> list.index_map(fn(f, _i) { f.0 <> " = ?" })
+    |> string.join(", ")
+
+  string.join(
+    [
+      "import gleam/dynamic/decode",
+      "import gleam/result",
+      "import "
+        <> app_name
+        <> "/domain/"
+        <> resource_singular
+        <> ".{type "
+        <> type_name
+        <> ", "
+        <> type_name
+        <> "}",
+      "import "
+        <> app_name
+        <> "/web/forms/"
+        <> resource_singular
+        <> "_form.{type "
+        <> type_name
+        <> "Params}",
+      "import sqlight",
+      "",
+      "fn "
+        <> resource_singular
+        <> "_decoder() -> decode.Decoder("
+        <> type_name
+        <> ") {",
+      "  use id <- decode.field(0, decode.int)",
+      decoder_fields,
+      "  decode.success("
+        <> type_name
+        <> "(id: id, "
+        <> constructor_args
+        <> "))",
+      "}",
+      "",
+      "pub fn list(db_path: String) -> List(" <> type_name <> ") {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  case sqlight.query("
+        <> q
+        <> "SELECT "
+        <> select_fields
+        <> " FROM "
+        <> table
+        <> " ORDER BY id DESC"
+        <> q
+        <> ", on: conn, with: [], expecting: "
+        <> resource_singular
+        <> "_decoder()) {",
+      "    Ok(rows) -> rows",
+      "    Error(_) -> []",
+      "  }",
+      "}",
+      "",
+      "pub fn get(db_path: String, id: Int) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query("
+        <> q
+        <> "SELECT "
+        <> select_fields
+        <> " FROM "
+        <> table
+        <> " WHERE id = ?"
+        <> q
+        <> ", on: conn, with: [sqlight.int(id)], expecting: "
+        <> resource_singular
+        <> "_decoder())",
+      "  |> result.replace_error(Nil)",
+      "  |> result.try(fn(rows) {",
+      "    case rows {",
+      "      [item] -> Ok(item)",
+      "      _ -> Error(Nil)",
+      "    }",
+      "  })",
+      "}",
+      "",
+      "pub fn create(db_path: String, params: "
+        <> type_name
+        <> "Params) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query(",
+      "    "
+        <> q
+        <> "INSERT INTO "
+        <> table
+        <> " ("
+        <> field_names
+        <> ") VALUES ("
+        <> insert_placeholders
+        <> ") RETURNING "
+        <> select_fields
+        <> q
+        <> ",",
+      "    on: conn,",
+      "    with: [",
+      insert_params,
+      "    ],",
+      "    expecting: " <> resource_singular <> "_decoder(),",
+      "  )",
+      "  |> result.replace_error(Nil)",
+      "  |> result.try(fn(rows) {",
+      "    case rows {",
+      "      [item] -> Ok(item)",
+      "      _ -> Error(Nil)",
+      "    }",
+      "  })",
+      "}",
+      "",
+      "pub fn update(",
+      "  db_path: String,",
+      "  id: Int,",
+      "  params: " <> type_name <> "Params,",
+      ") -> Result(" <> type_name <> ", Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query(",
+      "    "
+        <> q
+        <> "UPDATE "
+        <> table
+        <> " SET "
+        <> update_sets
+        <> " WHERE id = ? RETURNING "
+        <> select_fields
+        <> q
+        <> ",",
+      "    on: conn,",
+      "    with: [",
+      insert_params,
+      "      sqlight.int(id),",
+      "    ],",
+      "    expecting: " <> resource_singular <> "_decoder(),",
+      "  )",
+      "  |> result.replace_error(Nil)",
+      "  |> result.try(fn(rows) {",
+      "    case rows {",
+      "      [item] -> Ok(item)",
+      "      _ -> Error(Nil)",
+      "    }",
+      "  })",
+      "}",
+      "",
+      "pub fn delete(db_path: String, id: Int) -> Result(Nil, Nil) {",
+      "  use conn <- sqlight.with_connection(db_path)",
+      "  sqlight.query("
+        <> q
+        <> "DELETE FROM "
+        <> table
+        <> " WHERE id = ?"
+        <> q
+        <> ", on: conn, with: [sqlight.int(id)], expecting: decode.success(Nil))",
+      "  |> result.replace(Nil)",
+      "  |> result.replace_error(Nil)",
+      "}",
+      "",
+    ],
+    "\n",
+  )
+}
+
+fn resource_repo_pog(
+  app_name: String,
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  let field_names =
+    fields
+    |> list.map(fn(f) { f.0 })
+    |> string.join(", ")
+
+  let select_fields = "id, " <> field_names
+
+  let decoder_fields =
+    fields
+    |> list.index_map(fn(f, i) {
+      let #(name, field_type) = f
+      let decode_fn = case field_type {
+        "bool" -> "decode.bool"
+        "int" -> "decode.int"
+        "float" -> "decode.float"
+        _ -> "decode.string"
+      }
+      "  use "
+      <> name
+      <> " <- decode.field("
+      <> int.to_string(i + 1)
+      <> ", "
+      <> decode_fn
+      <> ")"
+    })
+    |> string.join("\n")
+
+  let constructor_args =
+    fields
+    |> list.map(fn(f) { f.0 <> ": " <> f.0 })
+    |> string.join(", ")
+
+  let insert_placeholders =
+    fields
+    |> list.index_map(fn(_, i) { "$" <> int.to_string(i + 1) })
+    |> string.join(", ")
+
+  let insert_params =
+    fields
+    |> list.map(fn(f) {
+      let #(name, field_type) = f
+      let pog_fn = case field_type {
+        "bool" -> "pog.bool"
+        "int" -> "pog.int"
+        "float" -> "pog.float"
+        _ -> "pog.text"
+      }
+      "  |> pog.parameter(" <> pog_fn <> "(params." <> name <> "))"
+    })
+    |> string.join("\n")
+
+  let update_sets =
+    fields
+    |> list.index_map(fn(f, i) { f.0 <> " = $" <> int.to_string(i + 1) })
+    |> string.join(", ")
+
+  let update_id_param = "$" <> int.to_string(list.length(fields) + 1)
+
+  let q = "\""
+  let table = resource_singular <> "s"
+
+  let list_query =
+    "  pog.query("
+    <> q
+    <> "SELECT "
+    <> select_fields
+    <> " FROM "
+    <> table
+    <> " ORDER BY id DESC"
+    <> q
+    <> ")"
+
+  let get_query =
+    "  pog.query("
+    <> q
+    <> "SELECT "
+    <> select_fields
+    <> " FROM "
+    <> table
+    <> " WHERE id = $1"
+    <> q
+    <> ")"
+
+  let create_query =
+    "  pog.query("
+    <> q
+    <> "INSERT INTO "
+    <> table
+    <> " ("
+    <> field_names
+    <> ") VALUES ("
+    <> insert_placeholders
+    <> ") RETURNING "
+    <> select_fields
+    <> q
+    <> ")"
+
+  let update_query =
+    "  pog.query("
+    <> q
+    <> "UPDATE "
+    <> table
+    <> " SET "
+    <> update_sets
+    <> " WHERE id = "
+    <> update_id_param
+    <> " RETURNING "
+    <> select_fields
+    <> q
+    <> ")"
+
+  let delete_query =
+    "  pog.query("
+    <> q
+    <> "DELETE FROM "
+    <> table
+    <> " WHERE id = $1"
+    <> q
+    <> ")"
+
+  let single_row_extract =
+    "  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [item] -> Ok(item)
+      _ -> Error(Nil)
+    }
+  })"
+
+  string.join(
+    [
+      "import gleam/dynamic/decode",
+      "import gleam/result",
+      "import "
+        <> app_name
+        <> "/domain/"
+        <> resource_singular
+        <> ".{type "
+        <> type_name
+        <> ", "
+        <> type_name
+        <> "}",
+      "import "
+        <> app_name
+        <> "/web/forms/"
+        <> resource_singular
+        <> "_form.{type "
+        <> type_name
+        <> "Params}",
+      "import pog",
+      "",
+      "fn "
+        <> resource_singular
+        <> "_decoder() -> decode.Decoder("
+        <> type_name
+        <> ") {",
+      "  use id <- decode.field(0, decode.int)",
+      decoder_fields,
+      "  decode.success("
+        <> type_name
+        <> "(id: id, "
+        <> constructor_args
+        <> "))",
+      "}",
+      "",
+      "pub fn list(db: pog.Connection) -> List(" <> type_name <> ") {",
+      list_query,
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      "  |> pog.execute(db)",
+      "  |> result.map(fn(r) { r.rows })",
+      "  |> result.unwrap([])",
+      "}",
+      "",
+      "pub fn get(db: pog.Connection, id: Int) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      get_query,
+      "  |> pog.parameter(pog.int(id))",
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      single_row_extract,
+      "}",
+      "",
+      "pub fn create(db: pog.Connection, params: "
+        <> type_name
+        <> "Params) -> Result("
+        <> type_name
+        <> ", Nil) {",
+      create_query,
+      insert_params,
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      single_row_extract,
+      "}",
+      "",
+      "pub fn update(",
+      "  db: pog.Connection,",
+      "  id: Int,",
+      "  params: " <> type_name <> "Params,",
+      ") -> Result(" <> type_name <> ", Nil) {",
+      update_query,
+      insert_params,
+      "  |> pog.parameter(pog.int(id))",
+      "  |> pog.returning(" <> resource_singular <> "_decoder())",
+      single_row_extract,
+      "}",
+      "",
+      "pub fn delete(db: pog.Connection, id: Int) -> Result(Nil, Nil) {",
+      delete_query,
+      "  |> pog.parameter(pog.int(id))",
+      "  |> pog.execute(db)",
+      "  |> result.replace(Nil)",
+      "  |> result.replace_error(Nil)",
+      "}",
+      "",
+    ],
+    "\n",
+  )
+}
+
+fn resource_migration(
+  name: String,
+  fields: List(#(String, String)),
+  db: DbChoice,
+) -> String {
+  let column_defs =
+    fields
+    |> list.map(fn(f) {
+      let #(field_name, field_type) = f
+      let sql_type = case db {
+        Sqlite -> to_sql_type_sqlite(field_type)
+        _ -> to_sql_type(field_type)
+      }
+      "  " <> field_name <> " " <> sql_type <> " NOT NULL"
+    })
+    |> string.join(",\n")
+
+  let table = singularize(name) <> "s"
+
+  case db {
+    Sqlite -> "CREATE TABLE " <> table <> " (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+" <> column_defs <> ",
+  inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"
+    _ -> "CREATE TABLE " <> table <> " (
+  id SERIAL PRIMARY KEY,
+" <> column_defs <> ",
+  inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"
+  }
+}
+
+fn api_resource_test(_app_name: String, _resource_singular: String) -> String {
+  "import gleeunit/should
+
+pub fn placeholder_test() {
+  // API handler tests require a running database.
+  // Test your domain logic and JSON encoding instead.
+  1 + 1
+  |> should.equal(2)
+}
+"
+}
+
+fn resource_test(
+  app_name: String,
+  resource_singular: String,
+  _type_name: String,
+  fields: List(#(String, String)),
+) -> String {
+  // Build valid form data for decode test
+  let valid_values =
+    fields
+    |> list.map(fn(f) {
+      let #(name, ftype) = f
+      let val = case ftype {
+        "bool" -> "on"
+        "int" -> "42"
+        "float" -> "3.14"
+        _ -> "test value"
+      }
+      "    #(\"" <> name <> "\", \"" <> val <> "\"),"
+    })
+    |> string.join("\n")
+
+  // Find required string fields for missing-field test
+  let required_fields =
+    fields
+    |> list.filter(fn(f) { f.1 == "string" || f.1 == "text" })
+
+  let missing_field_test = case required_fields {
+    [#(name, _), ..] -> "
+
+pub fn decode_missing_" <> name <> "_returns_error_test() {
+  let data =
+    wisp.FormData(values: [], files: [])
+
+  " <> resource_singular <> "_form.decode(data)
+  |> should.be_error
+}
+"
+    [] -> ""
+  }
+
+  "import gleeunit/should
+import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
+import wisp
+
+pub fn empty_form_has_no_id_test() {
+  let form = " <> resource_singular <> "_form.empty()
+  form.id
+  |> should.be_none
+}
+
+pub fn decode_valid_form_test() {
+  let data =
+    wisp.FormData(
+      values: [
+" <> valid_values <> "
+      ],
+      files: [],
+    )
+
+  " <> resource_singular <> "_form.decode(data)
+  |> should.be_ok
+}
+" <> missing_field_test
+}
+
+// =============================================================================
+// Router patching
+// =============================================================================
+
+fn patch_router_page(app: String, name: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  // Add import
+  let import_line = "import " <> app <> "/web/" <> name <> "_handler"
+  let content = add_import(content, import_line)
+
+  // Add route before catch-all
+  let route_line =
+    "    [\""
+    <> name
+    <> "\"], http.Get -> "
+    <> name
+    <> "_handler.index(req, ctx)"
+
+  let content = add_route(content, route_line)
+
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+fn patch_router_resource(app: String, plural: String, singular: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  // Add import
+  let import_line = "import " <> app <> "/web/" <> singular <> "_handler"
+  let content = add_import(content, import_line)
+
+  // Add routes before catch-all
+  let routes =
+    "\n    [\""
+    <> plural
+    <> "\"], http.Get -> "
+    <> singular
+    <> "_handler.index(req, ctx)
+    [\""
+    <> plural
+    <> "\", \"new\"], http.Get -> "
+    <> singular
+    <> "_handler.new(req, ctx)
+    [\""
+    <> plural
+    <> "\"], http.Post -> "
+    <> singular
+    <> "_handler.create(req, ctx)
+    [\""
+    <> plural
+    <> "\", id], http.Get -> "
+    <> singular
+    <> "_handler.show(req, ctx, id)
+    [\""
+    <> plural
+    <> "\", id, \"edit\"], http.Get -> "
+    <> singular
+    <> "_handler.edit(req, ctx, id)
+    [\""
+    <> plural
+    <> "\", id], http.Put -> "
+    <> singular
+    <> "_handler.update(req, ctx, id)
+    [\""
+    <> plural
+    <> "\", id], http.Delete -> "
+    <> singular
+    <> "_handler.delete(req, ctx, id)"
+
+  let content = add_route(content, routes)
+
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+fn patch_router_api_resource(app: String, plural: String, singular: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  let import_line = "import " <> app <> "/web/" <> singular <> "_handler"
+  let content = add_import(content, import_line)
+
+  // API routes: no /new or /edit (those are HTML-only)
+  let routes =
+    "\n    [\"api\", \""
+    <> plural
+    <> "\"], http.Get -> "
+    <> singular
+    <> "_handler.index(req, ctx)
+    [\"api\", \""
+    <> plural
+    <> "\"], http.Post -> "
+    <> singular
+    <> "_handler.create(req, ctx)
+    [\"api\", \""
+    <> plural
+    <> "\", id], http.Get -> "
+    <> singular
+    <> "_handler.show(req, ctx, id)
+    [\"api\", \""
+    <> plural
+    <> "\", id], http.Put -> "
+    <> singular
+    <> "_handler.update(req, ctx, id)
+    [\"api\", \""
+    <> plural
+    <> "\", id], http.Delete -> "
+    <> singular
+    <> "_handler.delete(req, ctx, id)"
+
+  let content = add_route(content, routes)
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+fn add_import(content: String, import_line: String) -> String {
+  // Check if import already exists
+  case string.contains(content, import_line) {
+    True -> content
+    False -> {
+      // Find last import line and add after it
+      let lines = string.split(content, "\n")
+      let #(before, after) = split_after_imports(lines, [])
+      string.join(list.append(before, [import_line, ..after]), "\n")
+    }
+  }
+}
+
+fn split_after_imports(
+  lines: List(String),
+  acc: List(String),
+) -> #(List(String), List(String)) {
+  case lines {
+    [] -> #(list.reverse(acc), [])
+    [line, ..rest] ->
+      case string.starts_with(line, "import ") {
+        True -> split_after_imports(rest, [line, ..acc])
+        False ->
+          case acc {
+            [] -> split_after_imports(rest, [line, ..acc])
+            _ -> #(list.reverse(acc), [line, ..rest])
+          }
+      }
+  }
+}
+
+fn add_route(content: String, route_line: String) -> String {
+  // Insert before the catch-all `_, _ ->` pattern
+  case string.split_once(content, "    _, _ ->") {
+    Ok(#(before, after)) -> before <> route_line <> "\n    _, _ ->" <> after
+    Error(_) ->
+      // Fallback: try `_ ->` pattern
+      case string.split_once(content, "    _ ->") {
+        Ok(#(before, after)) -> before <> route_line <> "\n    _ ->" <> after
+        Error(_) -> content
+      }
+  }
+}
+
+// =============================================================================
+// Field parsing and type conversion
+// =============================================================================
+
+pub fn parse_fields(raw: List(String)) -> List(#(String, String)) {
+  raw
+  |> list.filter_map(fn(field) {
+    case string.split(field, ":") {
+      [name, field_type] -> Ok(#(name, field_type))
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn to_gleam_type(field_type: String) -> String {
+  case field_type {
+    "string" -> "String"
+    "text" -> "String"
+    "int" -> "Int"
+    "float" -> "Float"
+    "bool" -> "Bool"
+    "date" -> "String"
+    "datetime" -> "String"
+    _ -> "String"
+  }
+}
+
+pub fn to_sql_type(field_type: String) -> String {
+  case field_type {
+    "string" -> "TEXT"
+    "text" -> "TEXT"
+    "int" -> "INTEGER"
+    "float" -> "DOUBLE PRECISION"
+    "bool" -> "BOOLEAN"
+    "date" -> "DATE"
+    "datetime" -> "TIMESTAMPTZ"
+    _ -> "TEXT"
+  }
+}
+
+fn to_sql_type_sqlite(field_type: String) -> String {
+  case field_type {
+    "string" -> "TEXT"
+    "text" -> "TEXT"
+    "int" -> "INTEGER"
+    "float" -> "REAL"
+    "bool" -> "INTEGER"
+    "date" -> "TEXT"
+    "datetime" -> "TEXT"
+    _ -> "TEXT"
+  }
+}
+
+fn form_default_value(field_type: String) -> String {
+  case field_type {
+    "bool" -> "False"
+    "int" -> "0"
+    "float" -> "0.0"
+    _ -> "\"\""
+  }
+}
+
+// =============================================================================
+// Auth generator templates
+// =============================================================================
+
+fn auth_user_type() -> String {
+  "pub type User {
+  User(id: Int, email: String, hashed_password: String)
+}
+"
+}
+
+fn auth_domain(_app: String) -> String {
+  "import argus
+import gleam/result
+
+/// Hash a password with Argon2id, using a fresh random salt and the
+/// OWASP-recommended cost settings. The result is a self-describing
+/// string (`$argon2id$...`) holding the salt and parameters, so it
+/// can be stored as-is and checked later with `verify_password`.
+pub fn hash_password(password: String) -> Result(String, Nil) {
+  argus.hasher()
+  |> argus.hash(password)
+  |> result.map(fn(output) { output.encoded_hash })
+  |> result.replace_error(Nil)
+}
+
+/// Check a password against a hash from `hash_password`. The comparison
+/// is constant-time; a malformed hash never matches.
+pub fn verify_password(password: String, hash: String) -> Bool {
+  argus.verify(hash, password)
+  |> result.unwrap(False)
+}
+"
+}
+
+/// The expression a generated handler uses to reach the database.
+fn auth_db_arg(db: DbChoice) -> String {
+  case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
+}
+
+fn auth_user_repo(app: String, db: DbChoice) -> String {
+  case db {
+    Sqlite -> auth_user_repo_sqlite(app)
+    _ -> auth_user_repo_pog(app)
+  }
+}
+
+fn auth_user_repo_sqlite(app: String) -> String {
+  let q = "\""
+  "import gleam/dynamic/decode
+import gleam/result
+import " <> app <> "/domain/user.{type User, User}
+import sqlight
+
+fn user_decoder() -> decode.Decoder(User) {
+  use id <- decode.field(0, decode.int)
+  use email <- decode.field(1, decode.string)
+  use hashed_password <- decode.field(2, decode.string)
+  decode.success(User(id: id, email: email, hashed_password: hashed_password))
+}
+
+pub fn get_by_email(db_path: String, email: String) -> Result(User, Nil) {
+  use conn <- sqlight.with_connection(db_path)
+  sqlight.query(
+    " <> q <> "SELECT id, email, hashed_password FROM users WHERE email = ?" <> q <> ",
+    on: conn,
+    with: [sqlight.text(email)],
+    expecting: user_decoder(),
+  )
+  |> result.replace_error(Nil)
+  |> result.try(fn(rows) {
+    case rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn get_by_id(db_path: String, id: Int) -> Result(User, Nil) {
+  use conn <- sqlight.with_connection(db_path)
+  sqlight.query(
+    " <> q <> "SELECT id, email, hashed_password FROM users WHERE id = ?" <> q <> ",
+    on: conn,
+    with: [sqlight.int(id)],
+    expecting: user_decoder(),
+  )
+  |> result.replace_error(Nil)
+  |> result.try(fn(rows) {
+    case rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn create(
+  db_path: String,
+  email: String,
+  hashed_password: String,
+) -> Result(User, Nil) {
+  use conn <- sqlight.with_connection(db_path)
+  sqlight.query(
+    " <> q <> "INSERT INTO users (email, hashed_password) VALUES (?, ?) RETURNING id, email, hashed_password" <> q <> ",
+    on: conn,
+    with: [sqlight.text(email), sqlight.text(hashed_password)],
+    expecting: user_decoder(),
+  )
+  |> result.replace_error(Nil)
+  |> result.try(fn(rows) {
+    case rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+"
+}
+
+fn auth_user_repo_pog(app: String) -> String {
+  let q = "\""
+  "import gleam/dynamic/decode
+import gleam/result
+import " <> app <> "/domain/user.{type User, User}
+import pog
+
+fn user_decoder() -> decode.Decoder(User) {
+  use id <- decode.field(0, decode.int)
+  use email <- decode.field(1, decode.string)
+  use hashed_password <- decode.field(2, decode.string)
+  decode.success(User(id: id, email: email, hashed_password: hashed_password))
+}
+
+pub fn get_by_email(db: pog.Connection, email: String) -> Result(User, Nil) {
+  pog.query(" <> q <> "SELECT id, email, hashed_password FROM users WHERE email = $1" <> q <> ")
+  |> pog.parameter(pog.text(email))
+  |> pog.returning(user_decoder())
+  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn get_by_id(db: pog.Connection, id: Int) -> Result(User, Nil) {
+  pog.query(" <> q <> "SELECT id, email, hashed_password FROM users WHERE id = $1" <> q <> ")
+  |> pog.parameter(pog.int(id))
+  |> pog.returning(user_decoder())
+  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+pub fn create(
+  db: pog.Connection,
+  email: String,
+  hashed_password: String,
+) -> Result(User, Nil) {
+  pog.query(
+    " <> q <> "INSERT INTO users (email, hashed_password) VALUES ($1, $2) RETURNING id, email, hashed_password" <> q <> ",
+  )
+  |> pog.parameter(pog.text(email))
+  |> pog.parameter(pog.text(hashed_password))
+  |> pog.returning(user_decoder())
+  |> pog.execute(db)
+  |> result.replace_error(Nil)
+  |> result.try(fn(r) {
+    case r.rows {
+      [user] -> Ok(user)
+      _ -> Error(Nil)
+    }
+  })
+}
+"
+}
+
+fn auth_migration(db: DbChoice) -> String {
+  case db {
+    Sqlite ->
+      "CREATE TABLE users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL UNIQUE,
+  hashed_password TEXT NOT NULL,
+  inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"
+    _ ->
+      "CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  hashed_password TEXT NOT NULL,
+  inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"
+  }
+}
+
+fn auth_form(_app: String) -> String {
+  "import gleam/list
+import gleam/result
+import refrakt/validate
+import wisp
+
+pub type LoginParams {
+  LoginParams(email: String, password: String)
+}
+
+pub type RegisterParams {
+  RegisterParams(email: String, password: String, password_confirmation: String)
+}
+
+pub fn decode_login(
+  data: wisp.FormData,
+) -> Result(LoginParams, List(#(String, String))) {
+  let email = get_value(data, \"email\")
+  let password = get_value(data, \"password\")
+
+  let errors =
+    []
+    |> validate.required(email, \"email\", \"Email is required\")
+    |> validate.required(password, \"password\", \"Password is required\")
+
+  case errors {
+    [] -> Ok(LoginParams(email: email, password: password))
+    _ -> Error(errors)
+  }
+}
+
+pub fn decode_register(
+  data: wisp.FormData,
+) -> Result(RegisterParams, List(#(String, String))) {
+  let email = get_value(data, \"email\")
+  let password = get_value(data, \"password\")
+  let password_confirmation = get_value(data, \"password_confirmation\")
+
+  let errors =
+    []
+    |> validate.required(email, \"email\", \"Email is required\")
+    |> validate.required(password, \"password\", \"Password is required\")
+    |> validate.min_length(password, \"password\", 8, \"Password must be at least 8 characters\")
+    |> check_confirmation(password, password_confirmation)
+
+  case errors {
+    [] ->
+      Ok(RegisterParams(
+        email: email,
+        password: password,
+        password_confirmation: password_confirmation,
+      ))
+    _ -> Error(errors)
+  }
+}
+
+fn check_confirmation(
+  errors: List(#(String, String)),
+  password: String,
+  confirmation: String,
+) -> List(#(String, String)) {
+  case password == confirmation {
+    True -> errors
+    False -> [#(\"password_confirmation\", \"Passwords do not match\"), ..errors]
+  }
+}
+
+fn get_value(data: wisp.FormData, key: String) -> String {
+  list.find(data.values, fn(v) { v.0 == key })
+  |> result.map(fn(v) { v.1 })
+  |> result.unwrap(\"\")
+}
+"
+}
+
+fn auth_handler(app: String, db: DbChoice) -> String {
+  let db_arg = auth_db_arg(db)
+  "import gleam/int
+import gleam/result
+import " <> app <> "/context.{type Context}
+import " <> app <> "/data/user_repo
+import " <> app <> "/domain/auth
+import " <> app <> "/web/auth_views
+import " <> app <> "/web/forms/auth_form
+import " <> app <> "/web/layouts/root_layout
+import refrakt/flash
+import wisp.{type Request, type Response}
+
+pub fn login_page(_req: Request, _ctx: Context) -> Response {
+  auth_views.login_view(\"\", [])
+  |> root_layout.wrap(\"Log In\")
+  |> wisp.html_response(200)
+}
+
+pub fn login(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+
+  case auth_form.decode_login(form_data) {
+    Error(errors) ->
+      auth_views.login_view(\"\", errors)
+      |> root_layout.wrap(\"Log In\")
+      |> wisp.html_response(422)
+
+    Ok(params) ->
+      case user_repo.get_by_email(" <> db_arg <> ", params.email) {
+        Error(_) ->
+          auth_views.login_view(params.email, [#(\"email\", \"Invalid email or password\")])
+          |> root_layout.wrap(\"Log In\")
+          |> wisp.html_response(422)
+
+        Ok(user) ->
+          case auth.verify_password(params.password, user.hashed_password) {
+            False ->
+              auth_views.login_view(params.email, [#(\"email\", \"Invalid email or password\")])
+              |> root_layout.wrap(\"Log In\")
+              |> wisp.html_response(422)
+
+            True ->
+              wisp.redirect(\"/\")
+              |> wisp.set_cookie(
+                req,
+                \"_user_id\",
+                int.to_string(user.id),
+                wisp.Signed,
+                60 * 60 * 24 * 7,
+              )
+              |> flash.set_flash(req, \"info\", \"Logged in\")
+          }
+      }
+  }
+}
+
+pub fn register_page(_req: Request, _ctx: Context) -> Response {
+  auth_views.register_view(\"\", [])
+  |> root_layout.wrap(\"Register\")
+  |> wisp.html_response(200)
+}
+
+pub fn register(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+
+  case auth_form.decode_register(form_data) {
+    Error(errors) ->
+      auth_views.register_view(\"\", errors)
+      |> root_layout.wrap(\"Register\")
+      |> wisp.html_response(422)
+
+    Ok(params) -> {
+      let created = {
+        use hashed <- result.try(auth.hash_password(params.password))
+        user_repo.create(" <> db_arg <> ", params.email, hashed)
+      }
+      case created {
+        Ok(user) ->
+          wisp.redirect(\"/\")
+          |> wisp.set_cookie(
+            req,
+            \"_user_id\",
+            int.to_string(user.id),
+            wisp.Signed,
+            60 * 60 * 24 * 7,
+          )
+          |> flash.set_flash(req, \"info\", \"Account created\")
+
+        Error(_) ->
+          auth_views.register_view(params.email, [#(\"email\", \"Could not create account\")])
+          |> root_layout.wrap(\"Register\")
+          |> wisp.html_response(422)
+      }
+    }
+  }
+}
+
+pub fn logout(req: Request, _ctx: Context) -> Response {
+  wisp.redirect(\"/\")
+  |> wisp.set_cookie(req, \"_user_id\", \"\", wisp.Signed, 0)
+  |> flash.set_flash(req, \"info\", \"Logged out\")
+}
+"
+}
+
+fn auth_views(_app: String) -> String {
+  "import gleam/list
+import lustre/attribute.{class, href, name, type_, value}
+import lustre/element.{type Element, text}
+import lustre/element/html.{
+  a, button, div, form, h1, input, label, p, section,
+}
+
+pub fn login_view(email: String, errors: List(#(String, String))) -> Element(Nil) {
+  section([class(\"auth-form\")], [
+    h1([], [text(\"Log In\")]),
+    form([attribute.action(\"/login\"), attribute.method(\"post\")], [
+      div([class(\"field\")], [
+        label([], [text(\"Email\")]),
+        input([type_(\"email\"), name(\"email\"), value(email)]),
+        field_error(errors, \"email\"),
+      ]),
+      div([class(\"field\")], [
+        label([], [text(\"Password\")]),
+        input([type_(\"password\"), name(\"password\")]),
+        field_error(errors, \"password\"),
+      ]),
+      button([type_(\"submit\"), class(\"btn\")], [text(\"Log In\")]),
+    ]),
+    p([], [
+      text(\"Don't have an account? \"),
+      a([href(\"/register\")], [text(\"Register\")]),
+    ]),
+  ])
+}
+
+pub fn register_view(
+  email: String,
+  errors: List(#(String, String)),
+) -> Element(Nil) {
+  section([class(\"auth-form\")], [
+    h1([], [text(\"Register\")]),
+    form([attribute.action(\"/register\"), attribute.method(\"post\")], [
+      div([class(\"field\")], [
+        label([], [text(\"Email\")]),
+        input([type_(\"email\"), name(\"email\"), value(email)]),
+        field_error(errors, \"email\"),
+      ]),
+      div([class(\"field\")], [
+        label([], [text(\"Password\")]),
+        input([type_(\"password\"), name(\"password\")]),
+        field_error(errors, \"password\"),
+      ]),
+      div([class(\"field\")], [
+        label([], [text(\"Confirm Password\")]),
+        input([type_(\"password\"), name(\"password_confirmation\")]),
+        field_error(errors, \"password_confirmation\"),
+      ]),
+      button([type_(\"submit\"), class(\"btn\")], [text(\"Register\")]),
+    ]),
+    p([], [
+      text(\"Already have an account? \"),
+      a([href(\"/login\")], [text(\"Log In\")]),
+    ]),
+  ])
+}
+
+fn field_error(errors: List(#(String, String)), field: String) -> Element(Nil) {
+  case list.find(errors, fn(e) { e.0 == field }) {
+    Ok(#(_, message)) -> p([class(\"error\")], [text(message)])
+    Error(_) -> text(\"\")
+  }
+}
+"
+}
+
+fn auth_middleware(app: String, db: DbChoice) -> String {
+  let db_arg = auth_db_arg(db)
+  "import gleam/int
+import gleam/result
+import " <> app <> "/context.{type Context}
+import " <> app <> "/data/user_repo
+import " <> app <> "/domain/user.{type User}
+import wisp.{type Request, type Response}
+
+/// Extract the current user from the session cookie.
+pub fn get_current_user(req: Request, ctx: Context) -> Result(User, Nil) {
+  use user_id_str <- result.try(wisp.get_cookie(req, \"_user_id\", wisp.Signed))
+  use user_id <- result.try(
+    int.parse(user_id_str)
+    |> result.replace_error(Nil),
+  )
+  user_repo.get_by_id(" <> db_arg <> ", user_id)
+}
+
+/// Middleware that requires authentication.
+/// Redirects to /login if no valid session.
+pub fn require_auth(
+  req: Request,
+  ctx: Context,
+  next: fn(User) -> Response,
+) -> Response {
+  case get_current_user(req, ctx) {
+    Ok(user) -> next(user)
+    Error(_) -> wisp.redirect(\"/login\")
+  }
+}
+"
+}
+
+fn auth_test(app: String) -> String {
+  "import gleam/string
+import gleeunit/should
+import " <> app <> "/domain/auth
+
+pub fn hash_password_round_trip_test() {
+  let assert Ok(hash) = auth.hash_password(\"secret123\")
+  auth.verify_password(\"secret123\", hash)
+  |> should.be_true
+}
+
+pub fn wrong_password_test() {
+  let assert Ok(hash) = auth.hash_password(\"secret123\")
+  auth.verify_password(\"wrong\", hash)
+  |> should.be_false
+}
+
+pub fn hash_uses_argon2id_test() {
+  let assert Ok(hash) = auth.hash_password(\"secret123\")
+  string.starts_with(hash, \"$argon2id$\")
+  |> should.be_true
+}
+
+pub fn hashes_are_salted_test() {
+  let assert Ok(first) = auth.hash_password(\"secret123\")
+  let assert Ok(second) = auth.hash_password(\"secret123\")
+  first
+  |> should.not_equal(second)
+}
+
+pub fn malformed_hash_never_matches_test() {
+  auth.verify_password(\"secret123\", \"not-a-hash\")
+  |> should.be_false
+}
+"
+}
+
+fn patch_router_auth(app: String) {
+  let router_path = "src/" <> app <> "/router.gleam"
+  let assert Ok(content) = simplifile.read(router_path)
+
+  let import_line = "import " <> app <> "/web/auth_handler"
+  let content = add_import(content, import_line)
+
+  let routes =
+    "\n    [\"login\"], http.Get -> auth_handler.login_page(req, ctx)
+    [\"login\"], http.Post -> auth_handler.login(req, ctx)
+    [\"register\"], http.Get -> auth_handler.register_page(req, ctx)
+    [\"register\"], http.Post -> auth_handler.register(req, ctx)
+    [\"logout\"], http.Post -> auth_handler.logout(req, ctx)"
+
+  let content = add_route(content, routes)
+
+  let assert Ok(_) = simplifile.write(router_path, content)
+}
+
+// =============================================================================
+// String helpers
+// =============================================================================
+
+fn capitalize(s: String) -> String {
+  case string.pop_grapheme(s) {
+    Ok(#(first, rest)) -> string.uppercase(first) <> rest
+    Error(_) -> s
+  }
+}
+
+fn extract_flag_value(args: List(String), flag: String) -> Result(String, Nil) {
+  case args {
+    [] -> Error(Nil)
+    [f, value, ..] if f == flag -> Ok(value)
+    [_, ..rest] -> extract_flag_value(rest, flag)
+  }
+}
+
+fn singularize(s: String) -> String {
+  // Simple singularization: drop trailing 's'
+  // Handles: posts -> post, users -> user, categories -> categorie (good enough for MVP)
+  case string.ends_with(s, "ies") {
+    True -> string.drop_end(s, 3) <> "y"
+    False ->
+      case string.ends_with(s, "ses") {
+        True -> string.drop_end(s, 2)
+        False ->
+          case string.ends_with(s, "s") {
+            True -> string.drop_end(s, 1)
+            False -> s
+          }
+      }
+  }
+}
+
+fn next_migration_number(app: String) -> String {
+  let dir = "src/" <> app <> "/data/migrations"
+  case simplifile.read_directory(dir) {
+    Ok(files) -> {
+      let count = list.length(files) + 1
+      pad_number(count, 3)
+    }
+    Error(_) -> "001"
+  }
+}
+
+fn pad_number(n: Int, width: Int) -> String {
+  let s = int.to_string(n)
+  let padding = width - string.length(s)
+  case padding > 0 {
+    True -> string.repeat("0", padding) <> s
+    False -> s
+  }
+}
+
+fn ensure_dir_for(path: String) {
+  case string.split(path, "/") {
+    [] -> Nil
+    parts -> {
+      let dir =
+        parts
+        |> list.take(list.length(parts) - 1)
+        |> string.join("/")
+      let _ = simplifile.create_directory_all(dir)
+      Nil
+    }
+  }
+}
+
+fn append_if(
+  items: List(String),
+  condition: Bool,
+  item: String,
+) -> List(String) {
+  case condition {
+    True -> list.append(items, [item])
+    False -> items
+  }
+}

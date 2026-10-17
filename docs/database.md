@@ -12,15 +12,16 @@ refrakt new my_app --db postgres
 ```
 
 This adds `pog` to dependencies and generates a `repo.gleam` that
-connects via URL:
+connects via URL, taken from `DATABASE_URL` or a local default:
 
 ```gleam
 // src/<app>/data/repo.gleam
 pub fn connect(cfg: Config) -> Result(pog.Connection, Nil) {
-  let db_url = case cfg.env {
-    config.Test -> "postgres://localhost:5432/my_app_test"
-    _ -> "postgres://localhost:5432/my_app_dev"
+  let default_url = case cfg.env {
+    config.Test -> "postgres://postgres@localhost:5432/my_app_test"
+    _ -> "postgres://postgres@localhost:5432/my_app_dev"
   }
+  let db_url = envoy.get("DATABASE_URL") |> result.unwrap(default_url)
 
   let pool_name = process.new_name(prefix: "my_app_db")
   use db_config <- result.try(pog.url_config(pool_name, db_url))

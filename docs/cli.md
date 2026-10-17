@@ -1,16 +1,22 @@
 # CLI Commands
 
-The Refrakt CLI is a code generator. Run it with:
+The Refrakt CLI is a code generator, published as the `refrakt_cli`
+package. Generated apps list it as a dev-dependency, so inside an app you
+run it with:
 
 ```bash
-gleam run -m refrakt/cli -- <command>
+gleam run -m refrakt_cli -- <command>
 ```
 
-Or set up an alias:
+The commands below are written as `refrakt <command>`, which assumes this
+alias:
 
 ```bash
-alias refrakt='gleam run -m refrakt/cli --'
+alias refrakt='gleam run -m refrakt_cli --'
 ```
+
+To create your first app, when there is no project to run the CLI from
+yet, see [Installation](installation.md#create-your-first-project).
 
 ## Commands
 
@@ -24,6 +30,10 @@ refrakt new my_app --db postgres
 refrakt new my_app --db sqlite
 refrakt new path/to/my_app    # extracts "my_app" as package name
 ```
+
+The generated `gleam.toml` depends on `refrakt` and lists `refrakt_cli`
+under `[dev-dependencies]`, so the generators keep working inside the new
+app.
 
 **Flags:**
 
@@ -72,6 +82,9 @@ refrakt gen resource posts title:string body:text --api
 API: 5 routes under `/api/` prefix).
 
 **Field types:** See [Field Types](field-types.md).
+
+**Requires** a database (`--db postgres` or `--db sqlite`); in a
+project without one the command refuses and writes nothing.
 
 **Naming:** The resource name should be plural (`posts`, not `post`).
 The generator singularizes it for types (`Post`) and file names

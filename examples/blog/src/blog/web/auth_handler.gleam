@@ -2,10 +2,10 @@ import blog/context.{type Context}
 import blog/data/user_repo
 import blog/domain/auth
 import blog/web/auth_views
-import blog/web/error_handler
 import blog/web/forms/auth_form
 import blog/web/layouts/root_layout
 import gleam/int
+import gleam/result
 import refrakt/flash
 import wisp.{type Request, type Response}
 
@@ -73,8 +73,11 @@ pub fn register(req: Request, ctx: Context) -> Response {
       |> wisp.html_response(422)
 
     Ok(params) -> {
-      let hashed = auth.hash_password(params.password)
-      case user_repo.create(ctx.db, params.email, hashed) {
+      let created = {
+        use hashed <- result.try(auth.hash_password(params.password))
+        user_repo.create(ctx.db, params.email, hashed)
+      }
+      case created {
         Ok(user) ->
           wisp.redirect("/")
           |> wisp.set_cookie(
