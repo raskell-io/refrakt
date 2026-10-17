@@ -72,14 +72,42 @@ refrakt gen resource posts title:string body:text --api
 
 **Creates (API mode with `--api`):**
 - Handler (5 actions: index, show, create, update, delete — JSON)
-- Params type
+- Params module (`web/forms/<singular>_form.gleam`): the params type,
+  a `gleam/dynamic/decode` decoder for the JSON body, and
+  `validate_params` with the same checks the HTML form runs
 - Domain type
 - Database repo
 - SQL migration
-- Tests
+- Tests (bad bodies and unknown ids; no database needed)
 
 **Patches:** `router.gleam` with RESTful routes (HTML: 7 routes,
 API: 5 routes under `/api/` prefix).
+
+**API responses.** Every response, errors included, is JSON:
+
+| Request | Success | Errors |
+|---------|---------|--------|
+| `GET /api/posts` | 200, array of records | |
+| `GET /api/posts/:id` | 200, the record | 404 |
+| `POST /api/posts` | 201, the record, `Location: /api/posts/:id` | 400, 422 |
+| `PUT /api/posts/:id` | 200, the record | 400, 422, 404 |
+| `DELETE /api/posts/:id` | 204, no body | 404 |
+
+- **404** `{"error": "not found"}` — no row with that id, or an id that
+  is not a number.
+- **422** `{"errors": {"title": "Title is required"}}` — the body
+  decoded but failed validation (one message per field).
+- **400** `{"error": "invalid request body", "details": [{"path":
+  "title", "expected": "String", "found": "Int"}]}` — a field has the
+  wrong type or is `null`, or the body is not an object. A body that is
+  not JSON at all is rejected by `wisp.require_json` with a plain-text
+  400, and a content type other than `application/json` with 415.
+
+Fields missing from the body get the value an empty HTML form field
+would (`""`, `0`, `0.0`, `false`), so a missing `string` or `text`
+field is a 422 "is required", like in the HTML form. A `float` field
+accepts JSON integers too. `update` checks the body before looking up
+the record, so a bad body gets 400/422 even for an unknown id.
 
 **Field types:** See [Field Types](field-types.md).
 

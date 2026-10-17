@@ -5,13 +5,14 @@
 #   1. `refrakt_cli new app [--db ...]`, run from packages/refrakt_cli
 #   2. point the app at the in-repo library and CLI (path dependencies),
 #      so the check covers HEAD rather than whatever is on Hex
-#   3. `gen resource posts ...`, `gen page about`, and `gen auth` when the
-#      app has a database, all run through the app's own dev-dependency
+#   3. `gen resource posts ...`, `gen resource memos ... --api`, `gen page
+#      about`, and `gen auth` when the app has a database, all run through
+#      the app's own dev-dependency
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`
 #   5. with a database: `refrakt_cli migrate` (including a hand-written
 #      multi-statement migration and a failing one that must roll back),
-#      boot the app and smoke-test /posts and the register/login flow
-#      with curl
+#      boot the app and smoke-test /posts, the /api/memos JSON API and the
+#      register/login flow with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -230,6 +231,9 @@ else
   # Field mixes that change the generated imports (warnings fail the build)
   cli gen resource notes body:text
   cli gen resource tasks title:string done:bool priority:int ratio:float
+  # JSON API resources (--api); see smoke_test_json_api below
+  cli gen resource memos title:string body:text pinned:bool rating:int --api
+  cli gen resource readings value:float count:int --api
 fi
 cli gen page about
 if [ "$db" != none ]; then
@@ -314,6 +318,73 @@ expect() {
   echo "ok  $what -> $got"
 }
 
+# -----------------------------------------------------------------------------
+# JSON API smoke test: the `gen resource memos ... --api` resource
+# -----------------------------------------------------------------------------
+
+# api <method> <path> [json-body] -> prints the HTTP status code. The body
+# lands in $work/body.html (where `expect` looks on failure), the headers in
+# $work/api.headers.
+api() {
+  local method="$1" path="$2" body="${3-}"
+  local args=(-sS -o "$work/body.html" -D "$work/api.headers" -w '%{http_code}' -X "$method")
+  if [ -n "$body" ]; then
+    args+=(-H 'content-type: application/json' --data "$body")
+  fi
+  curl "${args[@]}" "$base_url$path"
+}
+
+# api_body_has <text> <what>: fail unless the last API response contains text
+api_body_has() {
+  grep -qF -- "$1" "$work/body.html" || {
+    cat "$work/body.html" >&2
+    fail "$2: response body lacks $1"
+  }
+}
+
+smoke_test_json_api() {
+  step "Smoke-testing the JSON API (/api/memos)"
+  local memo_id memo_path
+
+  expect 201 "$(api POST /api/memos \
+    '{"title":"From CI","body":"Sent as JSON","pinned":true,"rating":4}')" \
+    "POST /api/memos"
+  api_body_has '"title":"From CI"' "POST /api/memos"
+  memo_id="$(grep -o '"id":[0-9]*' "$work/body.html" | head -n 1 | cut -d: -f2)"
+  [ -n "$memo_id" ] || fail "POST /api/memos returned no id"
+  memo_path="/api/memos/$memo_id"
+  grep -qi "^location: $memo_path" "$work/api.headers" ||
+    fail "POST /api/memos did not answer with Location: $memo_path"
+
+  expect 422 "$(api POST /api/memos '{"title":"","body":""}')" \
+    "POST /api/memos with blank fields"
+  api_body_has '"errors":{' "POST /api/memos with blank fields"
+  api_body_has '"title":"Title is required"' "POST /api/memos with blank fields"
+  expect 400 "$(api POST /api/memos '{not json')" "POST /api/memos with malformed JSON"
+  expect 400 "$(api POST /api/memos '{"title":42}')" "POST /api/memos with a wrong field type"
+  api_body_has '"error":"invalid request body"' "POST /api/memos with a wrong field type"
+
+  expect 200 "$(api GET "$memo_path")" "GET $memo_path"
+  api_body_has '"title":"From CI"' "GET $memo_path"
+  expect 200 "$(api PUT "$memo_path" \
+    '{"title":"Updated via JSON","body":"Sent as JSON","pinned":false,"rating":5}')" \
+    "PUT $memo_path"
+  api_body_has '"title":"Updated via JSON"' "PUT $memo_path"
+  api_body_has '"rating":5' "PUT $memo_path"
+  expect 422 "$(api PUT "$memo_path" '{"title":" "}')" "PUT $memo_path with a blank title"
+  expect 404 "$(api PUT /api/memos/999999 \
+    '{"title":"Nobody","body":"Home","pinned":false,"rating":1}')" \
+    "PUT /api/memos/999999 (missing id)"
+  api_body_has '"error":"not found"' "PUT /api/memos/999999 (missing id)"
+
+  expect 200 "$(api GET /api/memos)" "GET /api/memos"
+  api_body_has '"title":"Updated via JSON"' "GET /api/memos"
+
+  expect 204 "$(api DELETE "$memo_path")" "DELETE $memo_path"
+  expect 404 "$(api GET "$memo_path")" "GET $memo_path after delete"
+  expect 404 "$(api DELETE "$memo_path")" "DELETE $memo_path again"
+}
+
 step "Smoke-testing"
 expect 200 "$(status GET /)" "GET /"
 expect 200 "$(status GET /about)" "GET /about"
@@ -368,5 +439,7 @@ grep -qi "^set-cookie: _user_id=" "$work/login.headers" ||
 expect 422 "$(status POST /login \
   --data-urlencode "email=$email" \
   --data-urlencode "password=wrong password")" "POST /login with a wrong password"
+
+smoke_test_json_api
 
 step "OK ($db)"
