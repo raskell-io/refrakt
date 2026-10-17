@@ -6,7 +6,7 @@
 ///
 import gleam/io
 
-@external(erlang, "refrakt_dev_ffi", "run_dev")
+@external(erlang, "refrakt_cli_dev_ffi", "run_dev")
 fn run_dev() -> Nil
 
 pub fn run() {

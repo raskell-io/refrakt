@@ -1,4 +1,4 @@
--module(refrakt_dev_ffi).
+-module(refrakt_cli_dev_ffi).
 -export([run_dev/0]).
 
 run_dev() ->

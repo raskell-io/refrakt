@@ -1,4 +1,4 @@
--module(refrakt_build_ffi).
+-module(refrakt_cli_build_ffi).
 -export([run_cmd/1]).
 
 %% os:cmd/1 decodes UTF-8 output into a list of code points, which

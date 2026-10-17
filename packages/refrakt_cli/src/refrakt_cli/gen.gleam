@@ -4,10 +4,10 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/string
-import refrakt/cli/format
-import refrakt/cli/project
-import refrakt/cli/templates
-import refrakt/cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
+import refrakt_cli/format
+import refrakt_cli/project
+import refrakt_cli/templates
+import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 import simplifile
 
 // =============================================================================

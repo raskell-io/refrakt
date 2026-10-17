@@ -6,10 +6,10 @@
 import gleam/io
 import gleam/list
 import gleam/string
-import refrakt/cli/project
+import refrakt_cli/project
 import simplifile
 
-@external(erlang, "refrakt_build_ffi", "run_cmd")
+@external(erlang, "refrakt_cli_build_ffi", "run_cmd")
 fn run_cmd(cmd: String) -> String
 
 pub fn run() {
@@ -21,7 +21,9 @@ pub fn run() {
   case simplifile.read_directory(islands_dir) {
     Error(_) -> {
       io.println("No islands found in " <> islands_dir)
-      io.println("Generate one with: refrakt gen island <name>")
+      io.println(
+        "Generate one with: gleam run -m refrakt_cli -- gen island <name>",
+      )
     }
     Ok(files) -> {
       let islands =

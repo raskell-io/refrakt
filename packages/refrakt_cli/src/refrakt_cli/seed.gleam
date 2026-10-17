@@ -3,12 +3,12 @@
 /// Generates a seed module if it doesn't exist, then runs it.
 ///
 import gleam/io
-import refrakt/cli/format
-import refrakt/cli/project
-import refrakt/cli/types.{NoDb, Postgres, Sqlite}
+import refrakt_cli/format
+import refrakt_cli/project
+import refrakt_cli/types.{NoDb, Postgres, Sqlite}
 import simplifile
 
-@external(erlang, "refrakt_build_ffi", "run_cmd")
+@external(erlang, "refrakt_cli_build_ffi", "run_cmd")
 fn run_cmd(cmd: String) -> String
 
 pub fn run() {

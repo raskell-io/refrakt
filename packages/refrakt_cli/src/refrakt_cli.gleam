@@ -1,18 +1,18 @@
 /// Refrakt CLI entry point.
 ///
-/// Run with: gleam run -m refrakt/cli
+/// Run with: gleam run -m refrakt_cli -- <command>
 ///
 import argv
 import gleam/io
 import gleam/string
-import refrakt/cli/assets
-import refrakt/cli/build
-import refrakt/cli/dev
-import refrakt/cli/gen
-import refrakt/cli/migrate_cmd
-import refrakt/cli/new
-import refrakt/cli/routes
-import refrakt/cli/seed
+import refrakt_cli/assets
+import refrakt_cli/build
+import refrakt_cli/dev
+import refrakt_cli/gen
+import refrakt_cli/migrate_cmd
+import refrakt_cli/new
+import refrakt_cli/routes
+import refrakt_cli/seed
 
 pub fn main() {
   case argv.load().arguments {
@@ -33,7 +33,7 @@ pub fn main() {
     ["dev", ..] -> dev.run()
     ["help", ..] | ["--help", ..] | ["-h", ..] -> print_help()
     ["version", ..] | ["--version", ..] | ["-v", ..] ->
-      io.println("refrakt 0.3.0")
+      io.println("refrakt_cli 0.3.0")
     [cmd, ..] -> {
       io.println("Unknown command: " <> cmd)
       io.println("")
@@ -46,9 +46,9 @@ pub fn main() {
 fn print_help() {
   io.println(string.join(
     [
-      "refrakt — A convention-first web framework for Gleam",
+      "refrakt_cli — code generator for Refrakt, a convention-first web framework for Gleam",
       "",
-      "Usage: refrakt <command> [options]",
+      "Usage: gleam run -m refrakt_cli -- <command> [options]",
       "",
       "Commands:",
       "  new <name>                        Create a new project",
@@ -79,9 +79,9 @@ fn print_help() {
       "  string, text, int, float, bool, date, datetime",
       "",
       "Examples:",
-      "  refrakt new my_app --db postgres",
-      "  refrakt gen resource posts title:string body:text published:bool",
-      "  refrakt gen page about",
+      "  gleam run -m refrakt_cli -- new my_app --db postgres",
+      "  gleam run -m refrakt_cli -- gen resource posts title:string body:text published:bool",
+      "  gleam run -m refrakt_cli -- gen page about",
     ],
     "\n",
   ))

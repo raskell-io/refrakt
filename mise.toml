@@ -1,22 +1,30 @@
 # Refrakt - mise configuration
 # https://mise.jdx.dev/
+#
+# The repository holds two Gleam packages:
+#   packages/refrakt      runtime library
+#   packages/refrakt_cli  code generator
+# The tasks below run in both of them.
 
 [tools]
 erlang = "27"
 gleam = "1.19"
 rebar = "3"
 
+[env]
+REFRAKT_PACKAGES = "packages/refrakt packages/refrakt_cli"
+
 # =============================================================================
 # Build
 # =============================================================================
 
 [tasks.build]
-description = "Build all packages"
-run = "gleam build"
+description = "Build both packages (warnings are errors)"
+run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam build --warnings-as-errors) || exit 1; done"
 
 [tasks.check]
-description = "Type-check without full build"
-run = "gleam check"
+description = "Type-check both packages without a full build"
+run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam check) || exit 1; done"
 
 # =============================================================================
 # Development
@@ -24,31 +32,35 @@ run = "gleam check"
 
 [tasks.fmt]
 description = "Format code"
-run = "gleam format"
+run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam format src test) || exit 1; done"
 
 [tasks."fmt:check"]
 description = "Check formatting"
-run = "gleam format --check"
+run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam format --check src test) || exit 1; done"
 
 # =============================================================================
 # Test
 # =============================================================================
 
 [tasks.test]
-description = "Run all tests"
-run = "gleam test"
+description = "Run the tests of both packages"
+run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam test) || exit 1; done"
+
+[tasks."test:generated"]
+description = "Generate an app with the in-repo CLI and build/test/boot it (arg: none|sqlite|postgres)"
+run = ".github/scripts/test-generated-app.sh"
+
+[tasks."test:examples"]
+description = "Build and test the example apps"
+run = "for e in examples/blog examples/tasks_app; do (cd $e && gleam format --check src test && gleam build --warnings-as-errors && gleam test) || exit 1; done"
 
 # =============================================================================
 # Documentation
 # =============================================================================
 
 [tasks.doc]
-description = "Generate documentation"
-run = "gleam docs build"
-
-[tasks."doc:open"]
-description = "Generate and open documentation"
-run = "gleam docs build --open"
+description = "Generate documentation for both packages"
+run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam docs build) || exit 1; done"
 
 # =============================================================================
 # Lint
@@ -63,7 +75,7 @@ depends = ["fmt:check"]
 # =============================================================================
 
 [tasks.ci]
-description = "Run full CI pipeline"
+description = "Run the package checks from CI"
 depends = ["fmt:check", "build", "test", "doc"]
 
 [tasks."ci:quick"]
@@ -71,41 +83,13 @@ description = "Quick CI check"
 depends = ["check", "test"]
 
 # =============================================================================
-# CLI Testing
-# =============================================================================
-
-[tasks."cli:new"]
-description = "Test refrakt new (creates test_app/)"
-run = "gleam run -m refrakt_cli -- new test_app --db postgres"
-
-[tasks."cli:gen"]
-description = "Test refrakt gen resource inside test_app/"
-run = "cd test_app && gleam run -m refrakt_cli -- gen resource posts title:string body:text published:bool"
-
-[tasks."cli:clean"]
-description = "Remove test_app/ created by cli:new"
-run = "rm -rf test_app/"
-
-[tasks."cli:build"]
-description = "Build the standalone refrakt CLI binary"
-run = "./bin/build-cli.sh"
-
-# =============================================================================
-# Release
-# =============================================================================
-
-[tasks.release]
-description = "Full release pipeline"
-depends = ["lint", "test", "build"]
-
-# =============================================================================
 # Maintenance
 # =============================================================================
 
 [tasks.clean]
 description = "Clean build artifacts"
-run = "rm -rf build/"
+run = "rm -rf packages/refrakt/build packages/refrakt_cli/build"
 
 [tasks.deps]
 description = "Update dependencies"
-run = "gleam update"
+run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam update) || exit 1; done"

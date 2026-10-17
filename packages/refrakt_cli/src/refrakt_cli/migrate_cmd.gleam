@@ -5,12 +5,12 @@
 ///
 import gleam/io
 import gleam/string
-import refrakt/cli/format
-import refrakt/cli/project
-import refrakt/cli/types.{NoDb, Postgres, Sqlite}
+import refrakt_cli/format
+import refrakt_cli/project
+import refrakt_cli/types.{NoDb, Postgres, Sqlite}
 import simplifile
 
-@external(erlang, "refrakt_build_ffi", "run_cmd")
+@external(erlang, "refrakt_cli_build_ffi", "run_cmd")
 fn run_cmd(cmd: String) -> String
 
 pub fn run() {
@@ -29,7 +29,9 @@ pub fn run() {
       case simplifile.read_directory(migrations_dir) {
         Error(_) -> {
           io.println("No migrations directory found at " <> migrations_dir)
-          io.println("Generate a resource first: refrakt gen resource ...")
+          io.println(
+            "Generate a resource first: gleam run -m refrakt_cli -- gen resource ...",
+          )
         }
         Ok(files) -> {
           let sql_files =

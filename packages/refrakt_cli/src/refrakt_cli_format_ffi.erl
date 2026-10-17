@@ -1,4 +1,4 @@
--module(refrakt_format_ffi).
+-module(refrakt_cli_format_ffi).
 -export([format_files/1]).
 
 format_files(Paths) ->

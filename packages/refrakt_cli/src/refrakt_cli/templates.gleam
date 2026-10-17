@@ -4,7 +4,7 @@
 /// Templates use string concatenation — no macros, no interpolation engine.
 ///
 import gleam/string
-import refrakt/cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
+import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 
 // =============================================================================
 // Project files
@@ -31,16 +31,19 @@ mist = \">= 6.0.0 and < 7.0.0\"
 wisp = \">= 2.2.2 and < 3.0.0\"
 lustre = \">= 5.7.0 and < 6.0.0\"
 gleam_json = \">= 3.1.0 and < 4.0.0\"
-refrakt = \">= 0.3.0 and < 1.0.0\"" <> db_dep <> "
+refrakt = \">= 0.4.0 and < 1.0.0\"" <> db_dep <> "
 
 [dev-dependencies]
 gleeunit = \">= 1.11.0 and < 2.0.0\"
+refrakt_cli = \">= 0.4.0 and < 1.0.0\"
 "
 }
 
 pub fn gitignore() -> String {
   "/build/
 .DS_Store
+*.db
+erl_crash.dump
 "
 }
 
@@ -54,6 +57,17 @@ A web application built with [Refrakt](https://github.com/raskell-io/refrakt).
 ```bash
 gleam run    # Start the server at http://localhost:4000
 gleam test   # Run tests
+```
+
+## Generators
+
+The Refrakt code generator is a dev-dependency of this project:
+
+```bash
+gleam run -m refrakt_cli -- gen resource posts title:string body:text
+gleam run -m refrakt_cli -- gen page about
+gleam run -m refrakt_cli -- routes
+gleam run -m refrakt_cli -- help
 ```
 "
 }

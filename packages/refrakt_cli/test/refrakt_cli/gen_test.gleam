@@ -6,10 +6,10 @@
 import gleam/list
 import gleam/string
 import gleeunit/should
-import refrakt/cli/gen
-import refrakt/cli/new
-import refrakt/cli/project
-import refrakt/cli/types
+import refrakt_cli/gen
+import refrakt_cli/new
+import refrakt_cli/project
+import refrakt_cli/types
 import simplifile
 
 // =============================================================================
@@ -64,6 +64,21 @@ pub fn new_creates_project_structure_test() {
     |> should.be_true
     file_exists(project_dir <> "/test/my_app_test.gleam") |> should.be_true
     file_exists(project_dir <> "/priv/static/css/app.css") |> should.be_true
+  })
+}
+
+pub fn new_depends_on_library_and_cli_as_dev_dependency_test() {
+  in_temp_dir("new_deps", fn(dir) {
+    let project_dir = dir <> "/my_app"
+    new.run(project_dir, [])
+
+    let assert Ok(toml) = simplifile.read(project_dir <> "/gleam.toml")
+    let assert Ok(#(deps, dev_deps)) =
+      string.split_once(toml, "[dev-dependencies]")
+
+    string.contains(deps, "refrakt = ") |> should.be_true
+    string.contains(deps, "refrakt_cli") |> should.be_false
+    string.contains(dev_deps, "refrakt_cli = ") |> should.be_true
   })
 }
 
@@ -398,8 +413,8 @@ pub fn gen_island_creates_files_test() {
 // FFI helper
 // =============================================================================
 
-@external(erlang, "refrakt_test_ffi", "set_cwd")
+@external(erlang, "refrakt_cli_test_ffi", "set_cwd")
 fn set_cwd(path: String) -> Result(Nil, Nil)
 
-@external(erlang, "refrakt_test_ffi", "current_directory")
+@external(erlang, "refrakt_cli_test_ffi", "current_directory")
 fn current_directory() -> Result(String, Nil)

@@ -3,9 +3,9 @@
 import gleam/io
 import gleam/list
 import gleam/string
-import refrakt/cli/format
-import refrakt/cli/templates
-import refrakt/cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
+import refrakt_cli/format
+import refrakt_cli/templates
+import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 import simplifile
 
 pub fn run(path: String, flags: List(String)) {

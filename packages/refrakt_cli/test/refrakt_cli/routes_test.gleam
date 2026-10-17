@@ -1,7 +1,7 @@
 import gleam/list
 import gleam/string
 import gleeunit/should
-import refrakt/cli/routes
+import refrakt_cli/routes
 
 /// Collapse the padded columns so tests don't depend on column widths.
 fn columns(line: String) -> List(String) {

@@ -1,4 +1,4 @@
--module(refrakt_test_ffi).
+-module(refrakt_cli_test_ffi).
 -export([set_cwd/1, current_directory/0]).
 
 set_cwd(Path) ->

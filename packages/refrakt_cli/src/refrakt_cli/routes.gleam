@@ -3,7 +3,7 @@
 import gleam/io
 import gleam/list
 import gleam/string
-import refrakt/cli/project
+import refrakt_cli/project
 import simplifile
 
 pub fn run() {
