@@ -1,5 +1,5 @@
 name = "refrakt"
-version = "0.3.0"
+version = "0.4.0"
 target = "erlang"
 description = "Runtime helpers for Refrakt, a convention-first web framework for Gleam"
 licences = ["MIT"]

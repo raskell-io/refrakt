@@ -6,6 +6,30 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-17
+
+### Changed
+
+- **Breaking:** the CLI is now its own package, `refrakt_cli`, and is no
+  longer part of the `refrakt` library. Run it with
+  `gleam run -m refrakt_cli -- <command>` instead of
+  `gleam run -m refrakt/cli -- <command>`. The repository holds the two
+  packages under `packages/refrakt` and `packages/refrakt_cli`, both
+  published to Hex. The library no longer depends on `argv` or `tom`.
+- Generated apps depend on `refrakt >= 0.4.0` and list `refrakt_cli`
+  under `[dev-dependencies]`, so the generators run from inside the app
+  and never ship with it. A brand-new app is bootstrapped from a
+  throwaway project; see the installation guide.
+- The generated Postgres repo reads `DATABASE_URL`, falling back to a
+  local server as the `postgres` user.
+- The blog and tasks examples are regenerated with the current CLI
+  (Argon2id auth, `mist >= 6`, working edit/delete forms) and depend on
+  the in-repo packages.
+- CI builds, tests, migrates, boots and smoke-tests a freshly generated
+  app for no database, SQLite and Postgres, and builds the examples.
+  Pushing a `v*` tag publishes both packages and creates the GitHub
+  release.
+
 ### Security
 
 - `gen auth` hashed passwords with a single unsalted SHA-256 and
@@ -31,6 +55,16 @@ uses [Semantic Versioning](https://semver.org/).
   whose requests have all left their window; see
   `start_with_cleanup_interval` and `tracked_keys` (#12).
 - `refrakt routes` printed the root route as `/:` instead of `/` (#8).
+- Generated Postgres apps could never connect: the default URL had no
+  user, which `pog.url_config` rejects, so the app crashed on boot.
+- Generated edit forms sent `_method=put` as a form field, which
+  `wisp.method_override` ignores, so saving an edit returned 404. Edit
+  forms now post to `?_method=PUT`, and show pages get a delete button
+  (`?_method=DELETE`).
+- `gen resource` in a project without a database generated code that
+  did not compile; it now refuses and writes nothing.
+- Generated views imported `textarea`, `input` and `value` even when no
+  field used them, leaving unused-import warnings.
 
 ## [0.3.0] - 2026-10-17
 
@@ -84,7 +118,8 @@ uses [Semantic Versioning](https://semver.org/).
 - Library helpers for validation, flash messages, migrations and testing.
 - Documentation, tutorial and examples.
 
-[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/raskell-io/refrakt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/raskell-io/refrakt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/raskell-io/refrakt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/raskell-io/refrakt/releases/tag/v0.1.0
