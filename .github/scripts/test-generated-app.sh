@@ -8,8 +8,10 @@
 #   3. `gen resource posts ...`, `gen page about`, and `gen auth` when the
 #      app has a database, all run through the app's own dev-dependency
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`
-#   5. with a database: `refrakt_cli migrate`, boot the app and smoke-test
-#      /posts and the register/login flow with curl
+#   5. with a database: `refrakt_cli migrate`, check that APP_ENV=prod
+#      refuses a missing, development or short SECRET_KEY_BASE, boot the
+#      app and smoke-test /posts, CSRF rejection, and the
+#      register/login/logout flow with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -149,10 +151,51 @@ migrate_output="$(cli migrate)"
 echo "$migrate_output"
 echo "$migrate_output" | grep -q "migration(s) applied" || fail "migrate did not apply migrations"
 
-step "Booting the app on port $port"
 gleam_hex export erlang-shipment > /dev/null
+
+# expect_refusal <message> <env args...>: with these environment changes the
+# app must exit with a non-zero status and print the message.
+expect_refusal() {
+  local message="$1" output="$work/refusal.log" pid
+  shift
+  env "$@" PORT="$port" ./build/erlang-shipment/entrypoint.sh run > "$output" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 30); do
+    kill -0 "$pid" 2> /dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2> /dev/null; then
+    kill "$pid" 2> /dev/null || true
+    wait "$pid" 2> /dev/null || true
+    cat "$output" >&2
+    fail "app started with $*"
+  fi
+  if wait "$pid"; then
+    cat "$output" >&2
+    fail "app exited with status 0 with $*"
+  fi
+  grep -q "$message" "$output" || {
+    cat "$output" >&2
+    fail "app refused to start with $* but did not say \"$message\""
+  }
+  echo "ok  refuses to start with $*"
+}
+
+step "Checking production configuration"
+dev_key="$(grep -o '"dev-secret-key-base[^"]*"' src/app/config.gleam | tr -d '"')"
+[ -n "$dev_key" ] || fail "no development secret key in src/app/config.gleam"
+expect_refusal "SECRET_KEY_BASE is not set" -u SECRET_KEY_BASE APP_ENV=prod
+expect_refusal "development key" APP_ENV=prod SECRET_KEY_BASE="$dev_key"
+expect_refusal "at least 64 bytes" APP_ENV=prod SECRET_KEY_BASE=too-short
+
+step "Booting the app on port $port"
+if curl -s -o /dev/null "$base_url/"; then
+  fail "something is already listening on port $port; set PORT to a free port"
+fi
 log="$work/server.log"
-PORT="$port" ./build/erlang-shipment/entrypoint.sh run > "$log" 2>&1 &
+# APP_ENV is left unset on purpose: the app must warn about it.
+env -u APP_ENV -u SECRET_KEY_BASE PORT="$port" \
+  ./build/erlang-shipment/entrypoint.sh run > "$log" 2>&1 &
 server_pid=$!
 cleanup() {
   kill "$server_pid" 2> /dev/null || true
@@ -173,11 +216,28 @@ curl -fsS -o /dev/null "$base_url/" || {
   fail "server did not come up on $base_url"
 }
 
-# status <method> <path> [curl args...] -> prints the HTTP status code
+grep -q "APP_ENV is not set" "$log" || {
+  cat "$log"
+  fail "no warning about the unset APP_ENV"
+}
+echo "ok  warns that APP_ENV is not set"
+
+# status <method> <path> [curl args...] -> prints the HTTP status code.
+# Requests carry the Origin header a browser sends with the app's own forms.
 status() {
   local method="$1" path="$2"
   shift 2
-  curl -sS -o "$work/body.html" -w '%{http_code}' -X "$method" "$@" "$base_url$path"
+  curl -sS -o "$work/body.html" -w '%{http_code}' -X "$method" \
+    -H "Origin: $base_url" "$@" "$base_url$path"
+}
+
+# cross_site <method> <path> [curl args...] -> HTTP status of the request as
+# sent by a page on another site
+cross_site() {
+  local method="$1" path="$2"
+  shift 2
+  curl -sS -o "$work/body.html" -w '%{http_code}' -X "$method" \
+    -H "Origin: https://evil.example" "$@" "$base_url$path"
 }
 
 expect() {
@@ -203,6 +263,16 @@ expect 303 "$(status POST /posts \
   --data-urlencode "published=on")" "POST /posts"
 expect 200 "$(status GET /posts)" "GET /posts after create"
 grep -q "Hello from CI" "$work/body.html" || fail "created post missing from /posts"
+expect 403 "$(cross_site POST /posts \
+  --data-urlencode "title=Forged" \
+  --data-urlencode "body=Sent from another site")" "cross-site POST /posts"
+expect 403 "$(curl -sS -o "$work/body.html" -w '%{http_code}' -X POST \
+  -H "Sec-Fetch-Site: cross-site" \
+  --data-urlencode "title=Forged" \
+  --data-urlencode "body=Sent from another site" \
+  "$base_url/posts")" "POST /posts with Sec-Fetch-Site: cross-site"
+expect 200 "$(status GET /posts)" "GET /posts after forged creates"
+if grep -q "Forged" "$work/body.html"; then fail "a cross-site POST created a post"; fi
 expect 422 "$(status POST /posts --data-urlencode "title=" --data-urlencode "body=")" \
   "POST /posts with invalid form"
 expect 200 "$(status GET /posts)" "GET /posts"
@@ -212,6 +282,8 @@ expect 200 "$(status GET "$post_path")" "GET $post_path"
 # wisp.method_override reads _method from the query string of a POST
 grep -q "$post_path?_method=DELETE" "$work/body.html" ||
   fail "show page has no delete form posting to ?_method=DELETE"
+expect 403 "$(cross_site POST "$post_path?_method=DELETE")" "cross-site DELETE $post_path"
+expect 200 "$(status GET "$post_path")" "GET $post_path after forged delete"
 expect 200 "$(status GET "$post_path/edit")" "GET $post_path/edit"
 grep -q "$post_path?_method=PUT" "$work/body.html" ||
   fail "edit form does not post to ?_method=PUT"
@@ -230,8 +302,13 @@ expect 303 "$(status POST /register -D "$work/register.headers" \
   --data-urlencode "password=correct horse battery staple" \
   --data-urlencode "password_confirmation=correct horse battery staple")" \
   "POST /register"
-grep -qi "^set-cookie: _user_id=" "$work/register.headers" ||
-  fail "register did not set the session cookie"
+session_cookie="$(grep -i "^set-cookie: _session=" "$work/register.headers" || true)"
+[ -n "$session_cookie" ] || fail "register did not set the session cookie"
+for attribute in HttpOnly SameSite=Lax Max-Age=604800; do
+  echo "$session_cookie" | grep -q "$attribute" ||
+    fail "session cookie lacks $attribute: $session_cookie"
+done
+echo "ok  session cookie: $session_cookie"
 expect 422 "$(status POST /register \
   --data-urlencode "email=$email" \
   --data-urlencode "password=correct horse battery staple" \
@@ -241,10 +318,21 @@ expect 200 "$(status GET /login)" "GET /login"
 expect 303 "$(status POST /login -D "$work/login.headers" \
   --data-urlencode "email=$email" \
   --data-urlencode "password=correct horse battery staple")" "POST /login"
-grep -qi "^set-cookie: _user_id=" "$work/login.headers" ||
+grep -qi "^set-cookie: _session=" "$work/login.headers" ||
   fail "login did not set the session cookie"
 expect 422 "$(status POST /login \
   --data-urlencode "email=$email" \
   --data-urlencode "password=wrong password")" "POST /login with a wrong password"
+expect 422 "$(status POST /login \
+  --data-urlencode "email=nobody-$$@example.com" \
+  --data-urlencode "password=correct horse battery staple")" "POST /login with an unknown email"
+expect 403 "$(cross_site POST /login \
+  --data-urlencode "email=$email" \
+  --data-urlencode "password=correct horse battery staple")" "cross-site POST /login"
+expect 403 "$(cross_site POST /logout)" "cross-site POST /logout"
+expect 303 "$(status POST /logout -D "$work/logout.headers")" "POST /logout"
+grep -i "^set-cookie: _session=" "$work/logout.headers" | grep -q "Max-Age=0" ||
+  fail "logout did not clear the session cookie"
+echo "ok  logout clears the session cookie"
 
 step "OK ($db)"

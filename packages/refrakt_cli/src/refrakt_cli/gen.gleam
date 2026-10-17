@@ -203,7 +203,7 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   let assert Ok(_) =
     simplifile.write(test_path, case api_mode {
       True -> api_resource_test(app, singular)
-      False -> resource_test(app, singular, type_name, fields)
+      False -> resource_test(app, name, singular, fields, db)
     })
 
   // Patch router and format
@@ -307,8 +307,10 @@ fn auth_with_db(db: DbChoice) {
     #("src/" <> app <> "/web/forms/auth_form.gleam", auth_form(app)),
     #("src/" <> app <> "/web/auth_handler.gleam", auth_handler(app, db)),
     #("src/" <> app <> "/web/auth_views.gleam", auth_views(app)),
+    #("src/" <> app <> "/web/session.gleam", auth_session(app)),
     #("src/" <> app <> "/web/middleware/auth.gleam", auth_middleware(app, db)),
     #("test/" <> app <> "/web/auth_handler_test.gleam", auth_test(app)),
+    #("test/" <> app <> "/web/session_test.gleam", auth_session_test(app, db)),
   ]
 
   list.each(files, fn(file) {
@@ -1666,9 +1668,10 @@ pub fn placeholder_test() {
 
 fn resource_test(
   app_name: String,
+  resource_plural: String,
   resource_singular: String,
-  _type_name: String,
   fields: List(#(String, String)),
+  db: DbChoice,
 ) -> String {
   // Build valid form data for decode test
   let valid_values =
@@ -1690,7 +1693,7 @@ fn resource_test(
     fields
     |> list.filter(fn(f) { f.1 == "string" || f.1 == "text" })
 
-  let missing_field_test = case required_fields {
+  let missing_field_tests = case required_fields {
     [#(name, _), ..] -> "
 
 pub fn decode_missing_" <> name <> "_returns_error_test() {
@@ -1700,13 +1703,32 @@ pub fn decode_missing_" <> name <> "_returns_error_test() {
   " <> resource_singular <> "_form.decode(data)
   |> should.be_error
 }
+
+pub fn same_origin_invalid_create_rerenders_form_test() {
+  // browser_request sends an Origin header matching the host, as a
+  // browser does when it submits the form on /" <> resource_plural <> "/new.
+  let response =
+    simulate.browser_request(http.Post, \"/" <> resource_plural <> "\")
+    |> simulate.form_body([])
+    |> router.handle_request(test_context())
+
+  response.status
+  |> should.equal(422)
+}
 "
     [] -> ""
   }
 
-  "import gleeunit/should
-import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
+  let #(context_imports, context_value) = templates.test_context(db)
+
+  "import gleam/http
+import gleeunit/should
+import " <> app_name <> "/config
+import " <> app_name <> "/context.{type Context}
+import " <> app_name <> "/router
+import " <> app_name <> "/web/forms/" <> resource_singular <> "_form" <> context_imports <> "
 import wisp
+import wisp/simulate
 
 pub fn empty_form_has_no_id_test() {
   let form = " <> resource_singular <> "_form.empty()
@@ -1726,7 +1748,23 @@ pub fn decode_valid_form_test() {
   " <> resource_singular <> "_form.decode(data)
   |> should.be_ok
 }
-" <> missing_field_test
+
+pub fn cross_site_create_is_rejected_test() {
+  let response =
+    simulate.request(http.Post, \"/" <> resource_plural <> "\")
+    |> simulate.header(\"origin\", \"https://evil.example\")
+    |> simulate.form_body([])
+    |> router.handle_request(test_context())
+
+  response.status
+  |> should.equal(403)
+}
+" <> missing_field_tests <> "
+fn test_context() -> Context {
+  let assert Ok(cfg) = config.load()
+  " <> context_value <> "
+}
+"
 }
 
 // =============================================================================
@@ -1961,9 +1999,23 @@ fn auth_user_type() -> String {
 "
 }
 
-fn auth_domain(_app: String) -> String {
+/// An Argon2id hash of a random password nobody knows, made with
+/// `argus.hasher()`'s default cost settings (the ones `hash_password`
+/// uses), so verifying a password against it takes as long as against a
+/// real user's hash.
+const dummy_password_hash =
+  "$argon2id$v=13$m=19456,t=2,p=1$ifVUQ7umIYAd2kxrogck4g$p2a30+poAQh1eT0W6bef/xnaQUlPIMAtgLC/T3w7gn8"
+
+fn auth_domain(app: String) -> String {
   "import argus
 import gleam/result
+import " <> app <> "/domain/user.{type User}
+
+/// An Argon2id hash with the same cost settings as `hash_password`, of a
+/// password nobody knows. `authenticate` checks against it when there is
+/// no user with the given email. If you change the cost settings, replace
+/// it with a hash made with the new ones.
+pub const dummy_hash = \"" <> dummy_password_hash <> "\"
 
 /// Hash a password with Argon2id, using a fresh random salt and the
 /// OWASP-recommended cost settings. The result is a self-describing
@@ -1981,6 +2033,27 @@ pub fn hash_password(password: String) -> Result(String, Nil) {
 pub fn verify_password(password: String, hash: String) -> Bool {
   argus.verify(hash, password)
   |> result.unwrap(False)
+}
+
+/// Check a login: the user looked up by email, and the password given.
+/// When there is no such user the password is still checked, against
+/// `dummy_hash`, so the answer takes as long as for a wrong password and
+/// response times do not reveal which emails have accounts.
+pub fn authenticate(
+  user: Result(User, Nil),
+  password: String,
+) -> Result(User, Nil) {
+  case user {
+    Ok(user) ->
+      case verify_password(password, user.hashed_password) {
+        True -> Ok(user)
+        False -> Error(Nil)
+      }
+    Error(_) -> {
+      let _ = verify_password(password, dummy_hash)
+      Error(Nil)
+    }
+  }
 }
 "
 }
@@ -2236,14 +2309,14 @@ fn get_value(data: wisp.FormData, key: String) -> String {
 
 fn auth_handler(app: String, db: DbChoice) -> String {
   let db_arg = auth_db_arg(db)
-  "import gleam/int
-import gleam/result
+  "import gleam/result
 import " <> app <> "/context.{type Context}
 import " <> app <> "/data/user_repo
 import " <> app <> "/domain/auth
 import " <> app <> "/web/auth_views
 import " <> app <> "/web/forms/auth_form
 import " <> app <> "/web/layouts/root_layout
+import " <> app <> "/web/session
 import refrakt/flash
 import wisp.{type Request, type Response}
 
@@ -2263,30 +2336,19 @@ pub fn login(req: Request, ctx: Context) -> Response {
       |> wisp.html_response(422)
 
     Ok(params) ->
-      case user_repo.get_by_email(" <> db_arg <> ", params.email) {
+      case
+        user_repo.get_by_email(" <> db_arg <> ", params.email)
+        |> auth.authenticate(params.password)
+      {
+        Ok(user) ->
+          wisp.redirect(\"/\")
+          |> session.sign_in(req, ctx, user.id)
+          |> flash.set_flash(req, \"info\", \"Logged in\")
+
         Error(_) ->
           auth_views.login_view(params.email, [#(\"email\", \"Invalid email or password\")])
           |> root_layout.wrap(\"Log In\")
           |> wisp.html_response(422)
-
-        Ok(user) ->
-          case auth.verify_password(params.password, user.hashed_password) {
-            False ->
-              auth_views.login_view(params.email, [#(\"email\", \"Invalid email or password\")])
-              |> root_layout.wrap(\"Log In\")
-              |> wisp.html_response(422)
-
-            True ->
-              wisp.redirect(\"/\")
-              |> wisp.set_cookie(
-                req,
-                \"_user_id\",
-                int.to_string(user.id),
-                wisp.Signed,
-                60 * 60 * 24 * 7,
-              )
-              |> flash.set_flash(req, \"info\", \"Logged in\")
-          }
       }
   }
 }
@@ -2314,13 +2376,7 @@ pub fn register(req: Request, ctx: Context) -> Response {
       case created {
         Ok(user) ->
           wisp.redirect(\"/\")
-          |> wisp.set_cookie(
-            req,
-            \"_user_id\",
-            int.to_string(user.id),
-            wisp.Signed,
-            60 * 60 * 24 * 7,
-          )
+          |> session.sign_in(req, ctx, user.id)
           |> flash.set_flash(req, \"info\", \"Account created\")
 
         Error(_) ->
@@ -2332,10 +2388,95 @@ pub fn register(req: Request, ctx: Context) -> Response {
   }
 }
 
-pub fn logout(req: Request, _ctx: Context) -> Response {
+pub fn logout(req: Request, ctx: Context) -> Response {
   wisp.redirect(\"/\")
-  |> wisp.set_cookie(req, \"_user_id\", \"\", wisp.Signed, 0)
+  |> session.sign_out(req, ctx)
   |> flash.set_flash(req, \"info\", \"Logged out\")
+}
+"
+}
+
+fn auth_session(app: String) -> String {
+  "//// The login session: a cookie holding the user's id in a signed token
+//// that records when it was issued.
+////
+//// The cookie is HttpOnly (page scripts cannot read it), SameSite=Lax
+//// (browsers only send it along from other sites on plain link
+//// navigation, never with their form posts or scripts) and, in
+//// production, Secure (HTTPS only). The token is refused once it is
+//// older than `max_age`, even if a copy of the cookie is replayed after
+//// the browser dropped it. Changing SECRET_KEY_BASE signs everyone out.
+
+import gleam/http
+import gleam/http/cookie
+import gleam/http/request
+import gleam/http/response
+import gleam/int
+import gleam/list
+import gleam/option.{Some}
+import gleam/result
+import " <> app <> "/config
+import " <> app <> "/context.{type Context}
+import refrakt/token
+import wisp.{type Request, type Response}
+
+const cookie_name = \"_session\"
+
+/// Tokens of different purposes are not interchangeable.
+const purpose = \"session\"
+
+/// How long a login lasts, in seconds: seven days.
+const max_age = 604_800
+
+/// Sign the user in: set the session cookie on the response.
+pub fn sign_in(
+  resp: Response,
+  req: Request,
+  ctx: Context,
+  user_id: Int,
+) -> Response {
+  let value =
+    token.sign(
+      wisp.get_secret_key_base(req),
+      purpose,
+      int.to_string(user_id),
+      max_age_seconds: max_age,
+    )
+  response.set_cookie(resp, cookie_name, value, attributes(req, ctx, max_age))
+}
+
+/// Sign the user out: tell the browser to delete the session cookie.
+pub fn sign_out(resp: Response, req: Request, ctx: Context) -> Response {
+  response.set_cookie(resp, cookie_name, \"\", attributes(req, ctx, 0))
+}
+
+/// The id of the signed-in user, if the request has a valid session.
+pub fn user_id(req: Request) -> Result(Int, Nil) {
+  use value <- result.try(
+    request.get_cookies(req)
+    |> list.key_find(cookie_name),
+  )
+  use id <- result.try(
+    token.verify(
+      wisp.get_secret_key_base(req),
+      purpose,
+      value,
+      max_age_seconds: max_age,
+    )
+    |> result.replace_error(Nil),
+  )
+  int.parse(id)
+}
+
+fn attributes(req: Request, ctx: Context, max_age: Int) -> cookie.Attributes {
+  // Production always marks the cookie Secure, even behind a proxy that
+  // talks plain HTTP to the app. Development follows the request, as
+  // Safari drops Secure cookies on http://localhost.
+  let scheme = case ctx.config.env {
+    config.Prod -> http.Https
+    config.Dev | config.Test -> req.scheme
+  }
+  cookie.Attributes(..cookie.defaults(scheme), max_age: Some(max_age))
 }
 "
 }
@@ -2402,6 +2543,14 @@ pub fn register_view(
   ])
 }
 
+/// A \"Log out\" button for the layout. Logging out is a POST, so other
+/// sites cannot log your users out with a link or an image.
+pub fn logout_form() -> Element(Nil) {
+  form([attribute.action(\"/logout\"), attribute.method(\"post\")], [
+    button([type_(\"submit\"), class(\"btn\")], [text(\"Log Out\")]),
+  ])
+}
+
 fn field_error(errors: List(#(String, String)), field: String) -> Element(Nil) {
   case list.find(errors, fn(e) { e.0 == field }) {
     Ok(#(_, message)) -> p([class(\"error\")], [text(message)])
@@ -2413,20 +2562,16 @@ fn field_error(errors: List(#(String, String)), field: String) -> Element(Nil) {
 
 fn auth_middleware(app: String, db: DbChoice) -> String {
   let db_arg = auth_db_arg(db)
-  "import gleam/int
-import gleam/result
+  "import gleam/result
 import " <> app <> "/context.{type Context}
 import " <> app <> "/data/user_repo
 import " <> app <> "/domain/user.{type User}
+import " <> app <> "/web/session
 import wisp.{type Request, type Response}
 
-/// Extract the current user from the session cookie.
+/// The signed-in user, from the session cookie.
 pub fn get_current_user(req: Request, ctx: Context) -> Result(User, Nil) {
-  use user_id_str <- result.try(wisp.get_cookie(req, \"_user_id\", wisp.Signed))
-  use user_id <- result.try(
-    int.parse(user_id_str)
-    |> result.replace_error(Nil),
-  )
+  use user_id <- result.try(session.user_id(req))
   user_repo.get_by_id(" <> db_arg <> ", user_id)
 }
 
@@ -2446,9 +2591,11 @@ pub fn require_auth(
 }
 
 fn auth_test(app: String) -> String {
-  "import gleam/string
+  "import argus
+import gleam/string
 import gleeunit/should
 import " <> app <> "/domain/auth
+import " <> app <> "/domain/user.{User}
 
 pub fn hash_password_round_trip_test() {
   let assert Ok(hash) = auth.hash_password(\"secret123\")
@@ -2478,6 +2625,119 @@ pub fn hashes_are_salted_test() {
 pub fn malformed_hash_never_matches_test() {
   auth.verify_password(\"secret123\", \"not-a-hash\")
   |> should.be_false
+}
+
+pub fn dummy_hash_is_a_real_argon2id_hash_test() {
+  // A malformed hash fails fast; a real one runs Argon2 like a user's.
+  argus.verify(auth.dummy_hash, \"secret123\")
+  |> should.equal(Ok(False))
+}
+
+pub fn authenticate_accepts_the_right_password_test() {
+  let assert Ok(hash) = auth.hash_password(\"secret123\")
+  let user = User(id: 1, email: \"a@example.com\", hashed_password: hash)
+
+  auth.authenticate(Ok(user), \"secret123\")
+  |> should.equal(Ok(user))
+}
+
+pub fn authenticate_rejects_a_wrong_password_test() {
+  let assert Ok(hash) = auth.hash_password(\"secret123\")
+  let user = User(id: 1, email: \"a@example.com\", hashed_password: hash)
+
+  auth.authenticate(Ok(user), \"wrong\")
+  |> should.be_error
+}
+
+pub fn authenticate_rejects_an_unknown_user_test() {
+  auth.authenticate(Error(Nil), \"secret123\")
+  |> should.be_error
+}
+"
+}
+
+fn auth_session_test(app: String, db: DbChoice) -> String {
+  let #(context_imports, context_value) = templates.test_context(db)
+
+  "import gleam/http
+import gleam/http/request
+import gleam/list
+import gleam/string
+import gleeunit/should
+import " <> app <> "/config
+import " <> app <> "/context.{type Context}
+import " <> app <> "/web/session" <> context_imports <> "
+import refrakt/token
+import wisp
+import wisp/simulate
+
+pub fn signed_in_request_has_the_user_id_test() {
+  let req = simulate.browser_request(http.Post, \"/login\")
+  let resp = wisp.redirect(\"/\") |> session.sign_in(req, test_context(), 42)
+
+  simulate.browser_request(http.Get, \"/\")
+  |> simulate.session(req, resp)
+  |> session.user_id
+  |> should.equal(Ok(42))
+}
+
+pub fn signed_out_request_has_no_user_test() {
+  let req = simulate.browser_request(http.Post, \"/login\")
+  let signed_in = wisp.redirect(\"/\") |> session.sign_in(req, test_context(), 42)
+  let req =
+    simulate.browser_request(http.Post, \"/logout\")
+    |> simulate.session(req, signed_in)
+  let signed_out = wisp.redirect(\"/\") |> session.sign_out(req, test_context())
+
+  simulate.browser_request(http.Get, \"/\")
+  |> simulate.session(req, signed_out)
+  |> session.user_id
+  |> should.be_error
+}
+
+pub fn session_signed_with_another_key_is_rejected_test() {
+  let forged =
+    token.sign(\"not-the-secret-key-base\", \"session\", \"1\", max_age_seconds: 60)
+
+  simulate.browser_request(http.Get, \"/\")
+  |> request.set_cookie(\"_session\", forged)
+  |> session.user_id
+  |> should.be_error
+}
+
+pub fn session_cookie_is_http_only_and_same_site_test() {
+  let cookie = session_cookie(test_context())
+
+  string.contains(cookie, \"HttpOnly\")
+  |> should.be_true
+  string.contains(cookie, \"SameSite=Lax\")
+  |> should.be_true
+  string.contains(cookie, \"Max-Age=604800\")
+  |> should.be_true
+}
+
+pub fn session_cookie_is_secure_in_production_test() {
+  let ctx = test_context()
+  let ctx = context.Context(..ctx, config: config.Config(..ctx.config, env: config.Prod))
+
+  session_cookie(ctx)
+  |> string.contains(\"Secure\")
+  |> should.be_true
+}
+
+/// The Set-Cookie header of a sign-in over plain HTTP.
+fn session_cookie(ctx: Context) -> String {
+  let req =
+    simulate.browser_request(http.Post, \"/login\")
+    |> request.set_scheme(http.Http)
+  let resp = wisp.redirect(\"/\") |> session.sign_in(req, ctx, 42)
+  let assert Ok(cookie) = list.key_find(resp.headers, \"set-cookie\")
+  cookie
+}
+
+fn test_context() -> Context {
+  let assert Ok(cfg) = config.load()
+  " <> context_value <> "
 }
 "
 }

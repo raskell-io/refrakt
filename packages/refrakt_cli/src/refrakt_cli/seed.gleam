@@ -54,7 +54,7 @@ import " <> app <> "/config
 import " <> app <> "/data/repo
 
 pub fn main() {
-  let cfg = config.load()
+  let assert Ok(cfg) = config.load()
   let assert Ok(db) = repo.connect(cfg)
 
   io.println(\"Seeding database...\")
@@ -75,7 +75,7 @@ import " <> app <> "/config
 import " <> app <> "/data/repo
 
 pub fn main() {
-  let cfg = config.load()
+  let assert Ok(cfg) = config.load()
   let db_path = repo.database_path(cfg)
 
   io.println(\"Seeding database...\")

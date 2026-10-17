@@ -102,6 +102,15 @@ pub fn edit(req: Request, ctx: Context, id: String) -> Response {
 }
 ```
 
+## CSRF protection
+
+Forms need no hidden token field. The router middleware's
+`csrf.protect` rejects POST, PUT, PATCH and DELETE requests that a
+browser sent from another site with `403 Forbidden`, using the
+`Sec-Fetch-Site`, `Origin` and `Referer` headers browsers add
+themselves. Keep GET handlers free of side effects, since they are not
+checked. See [Routing](routing.md#csrf-protection).
+
 ## Validation helpers
 
 The `refrakt/validate` module provides composable validators:

@@ -85,7 +85,7 @@ import pog
 import refrakt/migrate
 
 pub fn main() {
-  let cfg = config.load()
+  let assert Ok(cfg) = config.load()
   let assert Ok(db) = repo.connect(cfg)
   let migrations_dir = \"src/" <> app <> "/data/migrations\"
 
@@ -133,7 +133,7 @@ import refrakt/migrate
 import sqlight
 
 pub fn main() {
-  let cfg = config.load()
+  let assert Ok(cfg) = config.load()
   let db_path = repo.database_path(cfg)
   let migrations_dir = \"src/" <> app <> "/data/migrations\"
 

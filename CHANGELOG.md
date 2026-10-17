@@ -6,6 +6,66 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Upgrading
+
+Generated code belongs to your app, so existing projects need these edits by hand.
+Compare with a freshly generated app (`refrakt new` plus `gen auth`):
+
+- **Dependencies:** bump `refrakt` to `>= 0.5.0 and < 1.0.0`.
+- **Router (CSRF):** add `import refrakt/csrf` and `use req <- csrf.protect(req)`
+  to `middleware`, after `rescue_crashes`. Make sure GET handlers have no side
+  effects, that your reverse proxy forwards the original `Host` header, and
+  that any API called from other sites' JavaScript is matched before
+  `csrf.protect`.
+- **Config:** `config.load()` now returns `Result(Config, ConfigError)`. Copy
+  `ConfigError`, `load_secret_key_base` and `describe_error` from a new
+  `config.gleam`; in `main`, handle the error (print it and halt) and add
+  `warn_if_app_env_unset`. Elsewhere (tests, `src/<app>/migrate.gleam`,
+  `src/<app>/seed.gleam`) use `let assert Ok(cfg) = config.load()`.
+- **Production:** with `APP_ENV=prod`, `SECRET_KEY_BASE` must now be set, be
+  at least 64 bytes and differ from the development key, or the app will not
+  start. Generate one with `openssl rand -hex 64`.
+- **Auth:** add `web/session.gleam` from a freshly generated app and use
+  `session.sign_in`, `session.sign_out` and `session.user_id` in place of the
+  `_user_id` cookie in `auth_handler.gleam` and `middleware/auth.gleam`. Copy
+  `dummy_hash` and `authenticate` into `domain/auth.gleam` and use
+  `authenticate` in the login handler. Everyone is logged out once, because
+  the cookie changes from `_user_id` to `_session`.
+
+### Security
+
+- Generated apps reject cross-site form posts (CSRF, #16). The new
+  `refrakt/csrf.protect` middleware, added to the generated router, answers
+  POST, PUT, PATCH and DELETE requests with `403 Forbidden` when the browser
+  says they came from another site (`Sec-Fetch-Site`, else `Origin` or
+  `Referer` compared with `Host`). Requests without any of these headers
+  (curl, servers, JSON API clients) go ahead without their cookies. Forms
+  need no hidden token field. `refrakt/testing` gained `same_origin` and
+  `cross_site` request helpers.
+- `gen auth` no longer reveals which emails have accounts through login
+  timing: an unknown email is checked against a dummy Argon2id hash, like a
+  wrong password (#19).
+- `gen auth` sessions (#19): the `_session` cookie holds a signed token with
+  the user id and its issue time, refused after 7 days on the server as well
+  as in the browser. It is `HttpOnly`, `SameSite=Lax`, and `Secure` whenever
+  `APP_ENV=prod`. Logout clears it, and `auth_views.logout_form()` renders a
+  logout button.
+- With `APP_ENV=prod`, generated apps refuse to start when `SECRET_KEY_BASE`
+  is missing, is the development key or is shorter than 64 bytes (#20).
+- Generated apps log a warning at startup when `APP_ENV` is unset, since that
+  means development mode with detailed error pages (#20). `refrakt dev`
+  sets `APP_ENV=dev` explicitly.
+
+### Changed
+
+- `config.load()` in generated apps returns `Result(Config, ConfigError)`;
+  `config.describe_error` explains a failure.
+- `refrakt new` generates `test/<app>/router_test.gleam`, and `gen resource`
+  tests now go through the router to check CSRF rejection and form
+  re-rendering. `gen auth` also generates `web/session.gleam` and
+  `test/<app>/web/session_test.gleam`.
+- Generated apps require `refrakt >= 0.5.0` for `refrakt/csrf`.
+
 ## [0.4.1] - 2026-10-17
 
 The first release on Hex since 0.2.0. Versions 0.3.0 and 0.4.0 were

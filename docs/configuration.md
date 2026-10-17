@@ -2,15 +2,19 @@
 
 Refrakt uses environment variables for configuration. The generated
 `config.gleam` reads them at startup and returns a typed `Config`
-record.
+record, or a `ConfigError` that stops the app from starting.
 
 ## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `4000` | HTTP server port |
-| `SECRET_KEY_BASE` | dev fallback | Secret for signing cookies (64+ chars) |
-| `APP_ENV` | `dev` | Environment: `dev`, `test`, or `prod` |
+| `SECRET_KEY_BASE` | dev fallback, none in prod | Secret for signing cookies (64+ bytes) |
+| `APP_ENV` | `dev` (with a startup warning) | Environment: `dev`, `test`, or `prod` |
+
+`refrakt dev` sets `APP_ENV=dev` itself. Running the app any other way
+without `APP_ENV` also means `dev`, and `main` logs a warning, since
+development mode shows stack traces on errors.
 
 ## Config module
 
@@ -32,15 +36,19 @@ pub type Env {
   Prod
 }
 
-pub fn load() -> Config {
+pub type ConfigError {
+  MissingSecretKeyBase
+  DevelopmentSecretKeyBase
+  ShortSecretKeyBase(bytes: Int)
+}
+
+const development_secret_key_base = "dev-secret-key-base-..."
+
+pub fn load() -> Result(Config, ConfigError) {
   let port =
     envoy.get("PORT")
     |> result.try(int.parse)
     |> result.unwrap(4000)
-
-  let secret_key_base =
-    envoy.get("SECRET_KEY_BASE")
-    |> result.unwrap("dev-secret-key-base-...")
 
   let env = case envoy.get("APP_ENV") {
     Ok("prod") -> Prod
@@ -48,14 +56,40 @@ pub fn load() -> Config {
     _ -> Dev
   }
 
-  Config(
+  use secret_key_base <- result.try(load_secret_key_base(env))
+
+  Ok(Config(
     port: port,
     port_string: int.to_string(port),
     secret_key_base: secret_key_base,
     env: env,
-  )
+  ))
+}
+
+fn load_secret_key_base(env: Env) -> Result(String, ConfigError) {
+  case envoy.get("SECRET_KEY_BASE"), env {
+    Error(_), Prod -> Error(MissingSecretKeyBase)
+    Error(_), _ -> Ok(development_secret_key_base)
+    Ok(key), Prod if key == development_secret_key_base ->
+      Error(DevelopmentSecretKeyBase)
+    Ok(key), _ ->
+      case string.byte_size(key) {
+        bytes if bytes < 64 -> Error(ShortSecretKeyBase(bytes))
+        _ -> Ok(key)
+      }
+  }
 }
 ```
+
+`main` prints `config.describe_error(error)` and exits with status 1
+when `load` fails. So production refuses to start without its own
+`SECRET_KEY_BASE`, with the development key (it is in your source
+code, so it is not secret), or with a key shorter than 64 bytes. A key
+shorter than 64 bytes is refused in every environment. Generate one
+with `openssl rand -hex 64`.
+
+In tests, `let assert Ok(cfg) = config.load()` gives the development
+configuration.
 
 ## Adding custom config
 

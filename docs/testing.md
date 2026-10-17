@@ -14,6 +14,29 @@ in `_test` in the `test/` directory.
 
 ## Generated tests
 
+### Router tests
+
+`refrakt new` generates `test/<app>/router_test.gleam`, which sends
+requests through `router.handle_request` with `wisp/simulate`. It checks
+that the home page renders, that a POST from another site is rejected
+with 403 by the CSRF check, and that a same-origin POST gets past it:
+
+```gleam
+pub fn cross_site_post_is_rejected_test() {
+  let response =
+    simulate.request(http.Post, "/")
+    |> simulate.header("origin", "https://evil.example")
+    |> router.handle_request(test_context())
+
+  response.status
+  |> should.equal(403)
+}
+```
+
+`simulate.browser_request` sends an `Origin` header matching the host,
+like a browser submitting one of your forms; use it for POST, PUT and
+DELETE requests that should succeed.
+
 ### Resource tests
 
 `refrakt gen resource posts title:string body:text published:bool`
@@ -43,6 +66,11 @@ pub fn decode_missing_title_returns_error_test() {
 }
 ```
 
+Through the router, they also check that a cross-site `POST /posts` is
+rejected with 403 and that a same-origin `POST /posts` with an empty
+form re-renders the form with 422. Neither request reaches the
+database.
+
 ### Auth tests
 
 `refrakt gen auth` generates password hashing tests:
@@ -65,8 +93,15 @@ pub fn hashes_are_salted_test() {
 }
 ```
 
-They also check that hashes are Argon2id and that a malformed hash
-never verifies.
+They also check that hashes are Argon2id, that a malformed hash never
+verifies, that `auth.dummy_hash` is a real Argon2id hash (so logins for
+unknown emails take as long as wrong passwords) and that
+`auth.authenticate` accepts only the right password.
+
+`test/<app>/web/session_test.gleam` checks that a session cookie
+round-trips to the user id, that signing out and forged tokens give no
+user, and that the cookie is `HttpOnly`, `SameSite=Lax`, has a
+`Max-Age`, and is `Secure` in production.
 
 ## Test helpers
 
@@ -89,6 +124,10 @@ let req = testing.get("/posts")
 // With body
 let req = testing.post("/posts")
   |> testing.with_body("title=hello")
+
+// As sent by a page of this app, or by another site (for refrakt/csrf)
+let req = testing.post("/posts") |> testing.same_origin
+let req = testing.post("/posts") |> testing.cross_site(from: "https://evil.example")
 
 // Check responses
 testing.assert_status(response, 200)
