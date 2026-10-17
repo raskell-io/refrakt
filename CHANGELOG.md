@@ -6,6 +6,29 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `testing.json_request(method, path, body)` builds a `wisp.Request`
+  with a JSON body and `content-type: application/json`, ready to pass
+  to a handler in tests.
+- `gen resource ... --api` generates handler tests: malformed and
+  invalid bodies (400, 422) and unknown ids (404). They need no
+  database. The generated-project CI now builds two `--api` resources
+  and exercises the JSON API of one end to end.
+
+### Fixed
+
+- `gen resource ... --api` generated `create` and `update` handlers that
+  answered `501 {"error":"not implemented"}`. The params module now
+  decodes the JSON body with `gleam/dynamic/decode` and validates it
+  with the same checks as the HTML form; `create` answers 201 with the
+  record and a `Location` header, `update` 200, a failed validation 422
+  `{"errors": {"field": "message"}}`, and a body with wrong field types
+  400. `delete` answers 204 (was 200 `{"ok":true}`), and `update` and
+  `delete` answer 404 for an unknown id, like `show` (#18).
+- `gen resource ... --api` with a `float` field imported `gleam/float`
+  without using it, a warning that failed `--warnings-as-errors` builds.
+
 ## [0.4.1] - 2026-10-17
 
 The first release on Hex since 0.2.0. Versions 0.3.0 and 0.4.0 were
