@@ -1,4 +1,6 @@
+import exception
 import gleam/dynamic/decode
+import gleam/erlang/process
 import gleam/http
 import gleam/http/request
 import gleeunit/should
@@ -35,4 +37,44 @@ pub fn json_request_with_malformed_body_is_rejected_test() {
   }
 
   response.status |> should.equal(400)
+}
+
+pub fn with_database_passes_the_database_and_closes_it_test() {
+  let closed = process.new_subject()
+
+  testing.with_database(
+    open: fn() { Ok("db") },
+    close: fn(db) { process.send(closed, db) },
+    run: fn(db) { db <> " used" },
+  )
+  |> should.equal("db used")
+  process.receive(closed, 0) |> should.equal(Ok("db"))
+}
+
+pub fn with_database_closes_when_the_body_panics_test() {
+  let closed = process.new_subject()
+
+  exception.rescue(fn() {
+    testing.with_database(
+      open: fn() { Ok("db") },
+      close: fn(db) { process.send(closed, db) },
+      run: fn(_) { panic as "assertion failed" },
+    )
+  })
+  |> should.be_error
+  process.receive(closed, 0) |> should.equal(Ok("db"))
+}
+
+pub fn with_database_fails_the_test_when_open_fails_test() {
+  let closed = process.new_subject()
+
+  exception.rescue(fn() {
+    testing.with_database(
+      open: fn() { Error("connection refused") },
+      close: fn(db) { process.send(closed, db) },
+      run: fn(_) { Nil },
+    )
+  })
+  |> should.be_error
+  process.receive(closed, 0) |> should.equal(Error(Nil))
 }

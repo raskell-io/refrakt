@@ -69,12 +69,25 @@ with typed decoders.
 ### PostgreSQL repos (Pog)
 
 ```gleam
-pub fn list(db: pog.Connection) -> List(Post) {
-  pog.query("SELECT id, title, body, published FROM posts ORDER BY id DESC")
-  |> pog.returning(post_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(r) { r.rows })
-  |> result.unwrap([])
+/// One page of posts, newest first, and how many there are.
+pub fn list(db: pog.Connection, params: paginate.Params) -> paginate.Page(Post) {
+  let items =
+    pog.query("SELECT id, title, body, published FROM posts ORDER BY id DESC LIMIT $1 OFFSET $2")
+    |> pog.parameter(pog.int(params.per_page))
+    |> pog.parameter(pog.int(paginate.offset(params)))
+    |> pog.returning(post_decoder())
+    |> pog.execute(db)
+    |> result.map(fn(r) { r.rows })
+    |> result.unwrap([])
+  let total = case
+    pog.query("SELECT COUNT(*) FROM posts")
+    |> pog.returning(decode.at([0], decode.int))
+    |> pog.execute(db)
+  {
+    Ok(pog.Returned(rows: [count], ..)) -> count
+    _ -> 0
+  }
+  paginate.page(items, params, total)
 }
 
 pub fn get(db: pog.Connection, id: Int) -> Result(Post, Nil) {
@@ -95,23 +108,62 @@ for type-safe parameter binding.
 ### SQLite repos (Sqlight)
 
 ```gleam
-pub fn list(db_path: String) -> List(Task) {
+pub fn list(db_path: String, params: paginate.Params) -> paginate.Page(Task) {
   use conn <- sqlight.with_connection(db_path)
-  case sqlight.query(
-    "SELECT id, title, completed FROM tasks ORDER BY id DESC",
-    on: conn,
-    with: [],
-    expecting: task_decoder(),
-  ) {
+  let items = case
+    sqlight.query(
+      "SELECT id, title, completed FROM tasks ORDER BY id DESC LIMIT ? OFFSET ?",
+      on: conn,
+      with: [sqlight.int(params.per_page), sqlight.int(paginate.offset(params))],
+      expecting: task_decoder(),
+    )
+  {
     Ok(rows) -> rows
     Error(_) -> []
   }
+  let total = case
+    sqlight.query("SELECT COUNT(*) FROM tasks", on: conn, with: [], expecting: decode.at([0], decode.int))
+  {
+    Ok([count]) -> count
+    _ -> 0
+  }
+  paginate.page(items, params, total)
 }
 ```
 
 SQLite uses `?` parameter placeholders and `sqlight.int()`,
 `sqlight.text()` for parameter binding. Boolean fields use
 `sqlight.decode_bool()` since SQLite stores booleans as integers.
+
+### Pagination
+
+`list` returns one page (`refrakt/paginate`): `paginate.Params(page:,
+per_page:)` goes in, and a `paginate.Page(item)` with the page's
+`items`, the `total` count, `total_pages`, `has_previous` and `has_next`
+comes out. The handler picks the page from the query string
+(`paginate.page_number(req)` for HTML, `paginate.from_request_with(req,
+per_page:)` for the JSON API, which also reads `?per_page=`); the page
+size is `pub const per_page` in the handler.
+
+Generated repos page with `LIMIT`/`OFFSET`: it works with any `ORDER
+BY`, lets visitors jump to any page and gives a total for "Page 2 of 5".
+The database still reads past the skipped rows, so very deep pages of
+very large tables get slow. For those, or for infinite scrolling,
+paginate by key instead: `WHERE id < $1 ORDER BY id DESC LIMIT $2`, with
+the last id of the previous page.
+
+To load every row (an export, say), add your own function next to
+`list`:
+
+```gleam
+pub fn all(db: pog.Connection) -> List(Post) {
+  pog.query("SELECT id, title, body, published FROM posts ORDER BY id DESC")
+  |> pog.returning(post_decoder())
+  |> pog.execute(db)
+  |> result.map(fn(r) { r.rows })
+  |> result.unwrap([])
+}
+```
 
 ## Decoders
 
@@ -170,7 +222,9 @@ writes nothing. `--belongs-to posts` gives the child:
   `optional(int)` column).
 
 - **`comment_repo.list_for_post(db, post_id)`**: the comments of one
-  post, oldest first.
+  post, oldest first. Unlike `list`, it is not paginated: it returns
+  every comment of the post, for the post's page. Add `LIMIT`/`OFFSET`
+  as `list` does if a parent can have very many children.
 - **`comment_repo.post_options(db)`** (HTML resources): `#(id, label)`
   pairs for the form's select, labelled with the post's first string
   field or `Post #<id>`.

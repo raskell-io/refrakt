@@ -62,6 +62,25 @@ pub fn run(
   query query_strings: fn(String) -> Result(List(String), String),
   transaction transaction: fn(List(String)) -> Result(Nil, String),
 ) -> Result(Int, String) {
+  apply(migrations_dir, query_strings, transaction, io.println)
+}
+
+/// Like `run`, but prints nothing. Test databases use it to apply the
+/// migrations before every test without filling the test output.
+pub fn run_quietly(
+  in migrations_dir: String,
+  query query_strings: fn(String) -> Result(List(String), String),
+  transaction transaction: fn(List(String)) -> Result(Nil, String),
+) -> Result(Int, String) {
+  apply(migrations_dir, query_strings, transaction, fn(_) { Nil })
+}
+
+fn apply(
+  migrations_dir: String,
+  query_strings: fn(String) -> Result(List(String), String),
+  transaction: fn(List(String)) -> Result(Nil, String),
+  log: fn(String) -> Nil,
+) -> Result(Int, String) {
   use _ <- result.try(
     transaction([create_migrations_table])
     |> result.map_error(fn(e) { "Could not create _migrations table: " <> e }),
@@ -69,7 +88,7 @@ pub fn run(
   use pending <- result.try(pending_migrations(query_strings, migrations_dir))
   use _ <- result.try(
     list.try_each(pending, fn(migration) {
-      io.println("  " <> migration.filename <> " ...")
+      log("  " <> migration.filename <> " ...")
       use _ <- result.try(
         transaction([migration.sql, record_statement(migration)])
         |> result.map_error(fn(e) {
@@ -79,7 +98,7 @@ pub fn run(
           <> e
         }),
       )
-      io.println("  " <> migration.filename <> " ✓")
+      log("  " <> migration.filename <> " ✓")
       Ok(Nil)
     }),
   )

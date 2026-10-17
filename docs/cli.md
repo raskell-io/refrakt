@@ -73,7 +73,10 @@ refrakt gen resource posts title:string body:text --api
 - Domain type
 - Database repo (Pog or Sqlight, auto-detected)
 - SQL migration
-- Tests
+- Tests, including create/show/update/delete and pagination through the
+  router against a real database
+- `test/<app>/support/test_db.gleam`, if the app has none yet (see
+  [Testing](testing.md#tests-against-the-database))
 
 **Creates (API mode with `--api`):**
 - Handler (5 actions: index, show, create, update, delete — JSON)
@@ -83,7 +86,9 @@ refrakt gen resource posts title:string body:text --api
 - Domain type
 - Database repo
 - SQL migration
-- Tests (bad bodies and unknown ids; no database needed)
+- Tests: bad bodies and unknown ids (no database needed), and
+  create/show/update/delete and pagination against the test database
+- `test/<app>/support/test_db.gleam`, if the app has none yet
 
 **Patches:** `router.gleam` with RESTful routes (HTML: 7 routes,
 API: 5 routes under `/api/` prefix).
@@ -107,11 +112,29 @@ written.
 
 | Request | Success | Errors |
 |---------|---------|--------|
-| `GET /api/posts` | 200, array of records | |
+| `GET /api/posts?page=1&per_page=20` | 200, one page of records (below) | |
 | `GET /api/posts/:id` | 200, the record | 404 |
 | `POST /api/posts` | 201, the record, `Location: /api/posts/:id` | 400, 422 |
 | `PUT /api/posts/:id` | 200, the record | 400, 422, 404 |
 | `DELETE /api/posts/:id` | 204, no body | 404 |
+
+**Pagination.** Both index actions show one page, newest first, with
+`LIMIT`/`OFFSET`. The page size is a constant in the handler,
+`pub const per_page = 20`; change it there.
+
+- HTML: `GET /posts?page=2`. A missing, invalid, zero or negative `page`
+  is page 1. The index view renders "Previous" and "Next" links
+  (`rel="prev"`/`rel="next"`) and "Page 2 of 5". A page past the end
+  lists nothing and links back to the last page.
+- API: `GET /api/posts?page=2&per_page=50` answers an envelope with the
+  page's records under `data`:
+
+  ```json
+  {"data": [{"id": 7, "title": "..."}], "page": 2, "per_page": 50, "total": 57, "total_pages": 2}
+  ```
+
+  `per_page` defaults to the handler's constant and is kept between 1
+  and 100 (`paginate.max_per_page`); `page` behaves as in HTML.
 
 - **404** `{"error": "not found"}` — no row with that id, or an id that
   is not a number.
@@ -167,7 +190,9 @@ refrakt gen auth
 ```
 
 **Creates:** 9 files — user domain, user repo, auth handler, auth
-views, auth form, auth middleware, migration, tests.
+views, auth form, auth middleware, migration, tests (including a
+register and log-in round trip against the test database), plus
+`test/<app>/support/test_db.gleam` if the app has none yet.
 
 **Patches:** `router.gleam` with 5 auth routes, and `gleam.toml` with the
 `argus` dependency (Argon2 password hashing) if it isn't there yet.

@@ -9,13 +9,17 @@
 #      with optional(T) fields and a `--belongs-to posts` child, `gen page
 #      about`, and `gen auth` when the app has a database, all run through
 #      the app's own dev-dependency
-#   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`
+#   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`.
+#      With a database, `gleam test` includes the DB-backed tests that go
+#      through test/app/support/test_db.gleam (create/show/update/delete,
+#      pagination, register/login)
 #   5. with a database: `refrakt_cli migrate` (including a hand-written
 #      multi-statement migration and a failing one that must roll back),
 #      check that APP_ENV=prod refuses a missing, development or short
 #      SECRET_KEY_BASE, boot the app and smoke-test /posts, CSRF
-#      rejection, the /api/memos JSON API, optional fields and relations,
-#      and the register/login/logout flow with curl
+#      rejection, the /api/memos JSON API, the register/login/logout
+#      flow, pagination of /posts and /api/memos, optional fields and
+#      relations with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -24,13 +28,17 @@
 #   mise exec -- .github/scripts/test-generated-app.sh sqlite
 #
 # Environment:
-#   SKIP_RUNTIME=1  stop after build/test/format (no migrate, boot or curl)
+#   SKIP_RUNTIME=1  stop after build/test/format (no migrate, boot or curl).
+#                   For postgres without a server on localhost:5432 it
+#                   also skips `gleam test`, whose DB-backed tests need one
 #   PORT            port the app listens on while smoke-testing (default 4000)
 #
 # The postgres variant expects a server on localhost:5432 that accepts the
-# connection URL in the generated src/app/data/repo.gleam
-# (postgres://postgres@localhost:5432/app_dev) and creates the app_dev
-# database itself, using psql when the database is missing.
+# connection URLs in the generated src/app/data/repo.gleam
+# (postgres://postgres@localhost:5432/app_dev) and
+# test/app/support/test_db.gleam (postgres://postgres@localhost:5432/app_test),
+# and creates the app_dev and app_test databases itself, using psql when
+# they are missing.
 
 set -euo pipefail
 
@@ -329,6 +337,11 @@ smoke_test_optional_and_relations() {
   done
   expect 400 "$(api POST /api/gadgets '{"label":"Bad","count":"many"}')" \
     "POST /api/gadgets with a count that is not a number"
+  # The index answers the pagination envelope, with null for None
+  expect 200 "$(api GET /api/gadgets)" "GET /api/gadgets"
+  for value in '"data":[' '"total":3' '"label":"Nulls","weight":null'; do
+    api_body_has "$value" "GET /api/gadgets"
+  done
 
   step "Smoke-testing --belongs-to (/posts and /comments)"
   expect 303 "$(status POST /posts -D "$work/headers" \
@@ -419,9 +432,51 @@ if [ "$db" != none ]; then
 fi
 cli routes
 
+# create_database <name>: create a Postgres database unless it exists
+create_database() {
+  if command -v psql > /dev/null; then
+    psql "postgres://postgres@localhost:5432/postgres" -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = '$1'" | grep -q 1 ||
+      psql "postgres://postgres@localhost:5432/postgres" -c "CREATE DATABASE $1"
+  else
+    echo "psql not found; assuming $1 already exists"
+  fi
+}
+
+postgres_reachable() {
+  (exec 3<> /dev/tcp/localhost/5432) 2> /dev/null
+}
+
+# The generated tests that use test/app/support/test_db.gleam need the
+# database: on SQLite each test gets its own in-memory one, on Postgres
+# they run in rolled-back transactions on app_test.
+run_tests=1
+if [ "$db" = postgres ]; then
+  if postgres_reachable; then
+    step "Creating the app_test database for the DB-backed tests"
+    create_database app_test
+  elif [ "${SKIP_RUNTIME:-}" = 1 ]; then
+    run_tests=0
+  else
+    fail "no Postgres server on localhost:5432 for the DB-backed tests"
+  fi
+fi
+
 step "Build, test, format"
 gleam_hex build --warnings-as-errors
-gleam_hex test
+if [ "$run_tests" = 1 ]; then
+  if [ "$db" != none ]; then
+    # gleam test runs every *_test function, so these run below
+    for test_file in post_handler_test memo_handler_test auth_handler_test; do
+      grep -q "use ctx <- test_db.with_context()" "test/app/web/$test_file.gleam" ||
+        fail "test/app/web/$test_file.gleam has no tests against the test database"
+    done
+  fi
+  gleam_hex test
+else
+  echo "skipping gleam test: the DB-backed tests need Postgres on localhost:5432"
+  echo "(gleam build above compiled them; CI runs them against its Postgres service)"
+fi
 gleam format --check src test
 
 if [ "$db" = none ] || [ "${SKIP_RUNTIME:-}" = 1 ]; then
@@ -431,13 +486,7 @@ fi
 
 if [ "$db" = postgres ]; then
   step "Creating the app_dev database if needed"
-  if command -v psql > /dev/null; then
-    psql "postgres://postgres@localhost:5432/postgres" -tAc \
-      "SELECT 1 FROM pg_database WHERE datname = 'app_dev'" | grep -q 1 ||
-      psql "postgres://postgres@localhost:5432/postgres" -c "CREATE DATABASE app_dev"
-  else
-    echo "psql not found; assuming app_dev already exists"
-  fi
+  create_database app_dev
 fi
 
 step "Running migrations"
@@ -703,5 +752,99 @@ echo "ok  logout clears the session cookie"
 
 smoke_test_json_api
 smoke_test_optional_and_relations
+
+# -----------------------------------------------------------------------------
+# Pagination (#22): /posts and /api/memos list one page at a time. Runs after
+# the smoke tests above, which delete the post and memo they create, so the
+# tables hold only the rows created here.
+# -----------------------------------------------------------------------------
+
+# count_matches <text>: how often text occurs in the last response body
+count_matches() {
+  { grep -oF -- "$1" "$work/body.html" || true; } | wc -l | tr -d ' '
+}
+
+# body_has and body_lacks are defined with the optional(T) checks above
+
+# expect_count <want> <text> <what>
+expect_count() {
+  local got
+  got="$(count_matches "$2")"
+  [ "$got" = "$1" ] || {
+    cat "$work/body.html" >&2
+    fail "$3: expected $1 x $2, got $got"
+  }
+  echo "ok  $3: $got x $2"
+}
+
+smoke_test_pagination() {
+  local per_page api_per_page i page
+  per_page="$(grep -o 'pub const per_page = [0-9]*' src/app/web/post_handler.gleam | grep -o '[0-9]*$')"
+  api_per_page="$(grep -o 'pub const per_page = [0-9]*' src/app/web/memo_handler.gleam | grep -o '[0-9]*$')"
+  [ -n "$per_page" ] || fail "no per_page constant in post_handler.gleam"
+  [ -n "$api_per_page" ] || fail "no per_page constant in memo_handler.gleam"
+
+  step "Pagination of /posts ($((per_page + 1)) posts, $per_page per page)"
+  expect 200 "$(status GET /posts)" "GET /posts before creating posts"
+  expect_count 0 "<li>" "GET /posts before creating posts"
+  for i in $(seq 1 $((per_page + 1))); do
+    [ "$(status POST /posts --data-urlencode "title=Paged post $i" \
+      --data-urlencode "body=Body $i")" = 303 ] || fail "POST /posts (paged post $i)"
+  done
+
+  expect 200 "$(status GET /posts)" "GET /posts"
+  expect_count "$per_page" "<li>" "GET /posts"
+  body_has "Page 1 of 2" "GET /posts"
+  body_has 'href="/posts?page=2"' "GET /posts"
+  body_has "Paged post $((per_page + 1))<" "GET /posts (newest first)"
+  body_lacks 'rel="prev"' "GET /posts"
+
+  expect 200 "$(status GET "/posts?page=2")" "GET /posts?page=2"
+  expect_count 1 "<li>" "GET /posts?page=2"
+  body_has "Page 2 of 2" "GET /posts?page=2"
+  body_has "Paged post 1<" "GET /posts?page=2 (oldest last)"
+  body_has 'href="/posts?page=1"' "GET /posts?page=2"
+  body_lacks 'rel="next"' "GET /posts?page=2"
+
+  expect 200 "$(status GET "/posts?page=3")" "GET /posts?page=3 (out of range)"
+  expect_count 0 "<li>" "GET /posts?page=3"
+  body_has 'href="/posts?page=2"' "GET /posts?page=3 (links back to the last page)"
+  body_lacks 'rel="next"' "GET /posts?page=3"
+
+  for page in 0 -1 abc; do
+    expect 200 "$(status GET "/posts?page=$page")" "GET /posts?page=$page"
+    body_has "Page 1 of 2" "GET /posts?page=$page (is page 1)"
+  done
+
+  step "Pagination of /api/memos (3 memos, per_page=2)"
+  for i in 1 2 3; do
+    [ "$(api POST /api/memos \
+      "{\"title\":\"Paged memo $i\",\"body\":\"Body\",\"pinned\":false,\"rating\":$i}")" = 201 ] ||
+      fail "POST /api/memos (paged memo $i)"
+  done
+
+  expect 200 "$(api GET /api/memos)" "GET /api/memos"
+  body_has "\"page\":1,\"per_page\":$api_per_page,\"total\":3,\"total_pages\":1" "GET /api/memos"
+  expect_count 3 '"title":"Paged memo' "GET /api/memos"
+
+  expect 200 "$(api GET "/api/memos?per_page=2")" "GET /api/memos?per_page=2"
+  body_has '"page":1,"per_page":2,"total":3,"total_pages":2' "GET /api/memos?per_page=2"
+  expect_count 2 '"title":"Paged memo' "GET /api/memos?per_page=2"
+  body_has '"title":"Paged memo 3"' "GET /api/memos?per_page=2 (newest first)"
+
+  expect 200 "$(api GET "/api/memos?page=2&per_page=2")" "GET /api/memos?page=2&per_page=2"
+  body_has '"page":2,"per_page":2,"total":3,"total_pages":2' "GET /api/memos?page=2&per_page=2"
+  expect_count 1 '"title":"Paged memo' "GET /api/memos?page=2&per_page=2"
+  body_has '"title":"Paged memo 1"' "GET /api/memos?page=2&per_page=2"
+
+  expect 200 "$(api GET "/api/memos?page=3&per_page=2")" "GET /api/memos?page=3&per_page=2 (out of range)"
+  body_has '"data":[]' "GET /api/memos?page=3&per_page=2"
+  body_has '"page":3' "GET /api/memos?page=3&per_page=2"
+
+  expect 200 "$(api GET "/api/memos?page=-4&per_page=1000")" "GET /api/memos?page=-4&per_page=1000"
+  body_has "\"page\":1,\"per_page\":100,\"total\":3" "GET /api/memos?page=-4&per_page=1000 (clamped)"
+}
+
+smoke_test_pagination
 
 step "OK ($db)"

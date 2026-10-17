@@ -50,7 +50,7 @@ pub fn run(path: String, flags: List(String)) {
   let files = [
     #(path <> "/gleam.toml", templates.gleam_toml(name, db)),
     #(path <> "/.gitignore", templates.gitignore()),
-    #(path <> "/README.md", templates.readme(name)),
+    #(path <> "/README.md", templates.readme(name, db)),
     #(path <> "/src/" <> name <> ".gleam", templates.main_module(name, db)),
     #(path <> "/src/" <> name <> "/config.gleam", templates.config_module(name)),
     #(

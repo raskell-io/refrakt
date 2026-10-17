@@ -366,16 +366,29 @@ fn generate_resource(
       resource_migration(name, fields, db, relation),
     )
 
+  // The DB-backed tests of a --belongs-to resource create a parent first
+  let parent = case relation {
+    Some(relation) -> parent_fixture(app, relation, db)
+    None -> None
+  }
   let assert Ok(_) =
     simplifile.write(test_path, case api_mode {
-      True -> api_resource_test(app, name, singular, db, fields)
+      True -> api_resource_test(app, name, singular, db, fields, parent)
       // A --belongs-to form re-renders with the parents from the database,
-      // which these tests do not start on Postgres
+      // which the tests that do not use test_db do not start on Postgres
       False ->
-        resource_test(app, name, singular, fields, db, case relation, db {
-          Some(_), Postgres -> False
-          _, _ -> True
-        })
+        resource_test(
+          app,
+          name,
+          singular,
+          fields,
+          db,
+          case relation, db {
+            Some(_), Postgres -> False
+            _, _ -> True
+          },
+          parent,
+        )
     })
 
   // An HTML child gets a component listing it on the parent's show page
@@ -401,6 +414,12 @@ fn generate_resource(
     _ -> []
   }
 
+  // The generated tests run against a real database
+  let test_db_paths = case ensure_test_db(app, db) {
+    Ok(path) -> [path]
+    Error(Nil) -> []
+  }
+
   // Patch router and format
   let _ = case api_mode {
     True -> patch_router_api_resource(app, name, singular)
@@ -408,7 +427,7 @@ fn generate_resource(
   }
   let router_path = "src/" <> app <> "/router.gleam"
   format.format_files(
-    list.flatten([[router_path], created_paths, patched_paths]),
+    list.flatten([[router_path], created_paths, patched_paths, test_db_paths]),
   )
 
   io.println("")
@@ -429,6 +448,7 @@ fn generate_resource(
     Some(children) -> io.println("  " <> children.component_path)
     None -> Nil
   }
+  list.each(test_db_paths, fn(path) { io.println("  " <> path) })
   io.println("")
   io.println("Updated:")
   io.println("  " <> router_path)
@@ -595,6 +615,12 @@ fn auth_with_db(db: DbChoice) {
     let assert Ok(_) = simplifile.write(path, content)
   })
 
+  // The generated auth tests register and log in against a real database
+  let test_db_paths = case ensure_test_db(app, db) {
+    Ok(path) -> [path]
+    Error(Nil) -> []
+  }
+
   // Passwords are hashed with Argon2 from the argus package
   let added_argus = project.add_dependency("argus", argus_requirement)
 
@@ -608,11 +634,12 @@ fn auth_with_db(db: DbChoice) {
         False -> Error(Nil)
       }
     })
-  format.format_files([router_path, ..gleam_paths])
+  format.format_files([router_path, ..list.append(gleam_paths, test_db_paths)])
 
   io.println("")
   io.println("Created:")
   list.each(files, fn(file) { io.println("  " <> file.0) })
+  list.each(test_db_paths, fn(path) { io.println("  " <> path) })
   io.println("")
   io.println("Updated:")
   io.println("  src/" <> app <> "/router.gleam")
@@ -998,6 +1025,26 @@ fn api_sample_json(field_type: String) -> String {
   }
 }
 
+/// Another valid JSON value for a field, for generated update tests.
+fn api_updated_json(field_type: String) -> String {
+  case base_type(field_type) {
+    "int" -> "json.int(7)"
+    "float" -> "json.float(2.5)"
+    "bool" -> "json.bool(False)"
+    _ -> "json.string(\"updated value\")"
+  }
+}
+
+/// `api_updated_json` as it appears in a JSON response.
+fn api_updated_json_text(field_type: String) -> String {
+  case base_type(field_type) {
+    "int" -> "7"
+    "float" -> "2.5"
+    "bool" -> "false"
+    _ -> "\"updated value\""
+  }
+}
+
 /// A JSON value of the wrong type for a field, for generated tests.
 fn api_wrong_json(field_type: String) -> String {
   case base_type(field_type) {
@@ -1231,6 +1278,11 @@ fn " <> check <> "(
 //// `{\"errors\": {\"field\": \"message\"}}` when validation fails. A body
 //// that is not JSON at all is rejected by `wisp.require_json` (400), as is
 //// a content type other than application/json (415).
+////
+//// The index is paginated: `GET /api/"
+  <> resource_plural
+  <> "?page=2&per_page=50` answers
+//// `{\"data\": [...], \"page\": 2, \"per_page\": 50, \"total\": 120, \"total_pages\": 3}`.
 
 import gleam/dynamic/decode
 import gleam/http/response
@@ -1260,15 +1312,30 @@ import "
   <> "/web/forms/"
   <> form
   <> "
+import refrakt/paginate
 import wisp.{type Request, type Response}
 
-pub fn index(_req: Request, ctx: Context) -> Response {
-  "
+/// How many "
+  <> resource_plural
+  <> " a page holds when the request has no `per_page`
+/// (which may ask for up to `paginate.max_per_page`).
+pub const per_page = 20
+
+pub fn index(req: Request, ctx: Context) -> Response {
+  let page =
+    "
   <> repo
   <> ".list("
   <> db_arg
-  <> ")
-  |> json.array(to_json)
+  <> ", paginate.from_request_with(req, per_page:))
+
+  json.object([
+    #(\"data\", json.array(page.items, to_json)),
+    #(\"page\", json.int(page.page)),
+    #(\"per_page\", json.int(page.per_page)),
+    #(\"total\", json.int(page.total)),
+    #(\"total_pages\", json.int(page.total_pages)),
+  ])
   |> json_response(200)
 }
 
@@ -1741,7 +1808,7 @@ fn resource_views(
     && !is_relation(fname)
   }
   let attribute_imports =
-    ["class", "href", "name"]
+    ["class", "href", "name", "rel"]
     |> append_if(uses(fn(f) { base_type(f.1) == "float" }), "step")
     |> list.append(["type_"])
     |> append_if(
@@ -1751,7 +1818,7 @@ fn resource_views(
   let html_imports =
     ["a", "button", "dd", "div", "dl", "dt", "form", "h1"]
     |> append_if(uses(renders_input), "input")
-    |> list.append(["label", "li", "p", "section"])
+    |> list.append(["label", "li", "nav", "p", "section", "span"])
     |> append_if(uses(fn(f) { base_type(f.1) == "text" }), "textarea")
     |> list.append(["ul"])
 
@@ -1776,8 +1843,9 @@ import lustre/element.{type Element, text}
 import lustre/element/html.{" <> string.join(html_imports, ", ") <> "}
 import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
+import refrakt/paginate
 
-pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
+pub fn index_view(page: paginate.Page(" <> type_name <> ")) -> Element(Nil) {
   section([class(\"" <> resource_plural <> "\")], [
     div([class(\"header\")], [
       h1([], [text(\"" <> type_name <> "s\")]),
@@ -1785,7 +1853,7 @@ pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
     ]),
     ul(
       [class(\"post-list\")],
-      list.map(items, fn(item) {
+      list.map(page.items, fn(item) {
         li([], [
           a([href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id))], [
             text(" <> show_title <> "),
@@ -1793,6 +1861,40 @@ pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
         ])
       }),
     ),
+    pagination(page),
+  ])
+}
+
+/// Links to the previous and next pages, and where this page is.
+fn pagination(page: paginate.Page(item)) -> Element(Nil) {
+  let link = fn(page_number, label, relation) {
+    a(
+      [
+        href(paginate.page_path(\"/" <> resource_plural <> "\", page_number)),
+        rel(relation),
+        class(\"btn\"),
+      ],
+      [text(label)],
+    )
+  }
+
+  nav([class(\"pagination\")], [
+    case paginate.previous_page(page) {
+      Ok(previous) -> link(previous, \"Previous\", \"prev\")
+      Error(_) -> text(\"\")
+    },
+    span([], [
+      text(
+        \"Page \"
+        <> int.to_string(page.page)
+        <> \" of \"
+        <> int.to_string(page.total_pages),
+      ),
+    ]),
+    case paginate.next_page(page) {
+      Ok(next) -> link(next, \"Next\", \"next\")
+      Error(_) -> text(\"\")
+    },
   ])
 }
 
@@ -2453,6 +2555,7 @@ fn resource_repo_sqlite(
         <> "_form.{type "
         <> type_name
         <> "Params}",
+      "import refrakt/paginate",
       "import sqlight",
       "",
       "fn "
@@ -2469,22 +2572,38 @@ fn resource_repo_sqlite(
         <> "))",
       "}",
       "",
-      "pub fn list(db_path: String) -> List(" <> type_name <> ") {",
+      "/// One page of " <> table <> ", newest first, and how many there are.",
+      "pub fn list(db_path: String, params: paginate.Params) -> paginate.Page("
+        <> type_name
+        <> ") {",
       "  use conn <- sqlight.with_connection(db_path)",
-      "  case sqlight.query("
+      "  let items = case sqlight.query(",
+      "    "
         <> q
         <> "SELECT "
         <> select_fields
         <> " FROM "
         <> table
-        <> " ORDER BY id DESC"
+        <> " ORDER BY id DESC LIMIT ? OFFSET ?"
         <> q
-        <> ", on: conn, with: [], expecting: "
-        <> resource_singular
-        <> "_decoder()) {",
+        <> ",",
+      "    on: conn,",
+      "    with: [sqlight.int(params.per_page), sqlight.int(paginate.offset(params))],",
+      "    expecting: " <> resource_singular <> "_decoder(),",
+      "  ) {",
       "    Ok(rows) -> rows",
       "    Error(_) -> []",
       "  }",
+      "  let total = case sqlight.query("
+        <> q
+        <> "SELECT COUNT(*) FROM "
+        <> table
+        <> q
+        <> ", on: conn, with: [], expecting: decode.at([0], decode.int)) {",
+      "    Ok([count]) -> count",
+      "    _ -> 0",
+      "  }",
+      "  paginate.page(items, params, total)",
       "}",
       "",
       "pub fn get(db_path: String, id: Int) -> Result("
@@ -2666,7 +2785,7 @@ fn resource_repo_pog(
     <> select_fields
     <> " FROM "
     <> table
-    <> " ORDER BY id DESC"
+    <> " ORDER BY id DESC LIMIT $1 OFFSET $2"
     <> q
     <> ")"
 
@@ -2749,6 +2868,7 @@ fn resource_repo_pog(
         <> type_name
         <> "Params}",
       "import pog",
+      "import refrakt/paginate",
       "",
       "fn "
         <> resource_singular
@@ -2764,12 +2884,27 @@ fn resource_repo_pog(
         <> "))",
       "}",
       "",
-      "pub fn list(db: pog.Connection) -> List(" <> type_name <> ") {",
+      "/// One page of " <> table <> ", newest first, and how many there are.",
+      "pub fn list(db: pog.Connection, params: paginate.Params) -> paginate.Page("
+        <> type_name
+        <> ") {",
+      "  let items =",
       list_query,
+      "  |> pog.parameter(pog.int(params.per_page))",
+      "  |> pog.parameter(pog.int(paginate.offset(params)))",
       "  |> pog.returning(" <> resource_singular <> "_decoder())",
       "  |> pog.execute(db)",
       "  |> result.map(fn(r) { r.rows })",
       "  |> result.unwrap([])",
+      "  let total = case",
+      "    pog.query(" <> q <> "SELECT COUNT(*) FROM " <> table <> q <> ")",
+      "    |> pog.returning(decode.at([0], decode.int))",
+      "    |> pog.execute(db)",
+      "  {",
+      "    Ok(pog.Returned(rows: [count], ..)) -> count",
+      "    _ -> 0",
+      "  }",
+      "  paginate.page(items, params, total)",
       "}",
       "",
       "pub fn get(db: pog.Connection, id: Int) -> Result("
@@ -3013,10 +3148,40 @@ fn api_resource_test(
   resource_singular: String,
   db: DbChoice,
   fields: List(#(String, String)),
+  parent: Option(ParentFixture),
 ) -> String {
   let handler = resource_singular <> "_handler"
   let form = resource_singular <> "_form"
   let path = "/api/" <> resource_plural
+
+  // With a --belongs-to parent, the bodies take the parent id: the tests
+  // without a database send 1, the DB-backed ones a parent they create
+  let #(body_param, static_arg, db_arg, parent_setup, parent_fn, parent_imports) = case
+    parent
+  {
+    None -> #("", "", "", "", "", "")
+    Some(parent) -> {
+      let field = parent.relation.field
+      #(
+        field <> ": Int",
+        "1",
+        field,
+        "\n  let "
+          <> field
+          <> " = create_"
+          <> parent.relation.singular
+          <> "(ctx)",
+        parent.create_fn,
+        parent.imports,
+      )
+    }
+  }
+  let json_value = fn(f: #(String, String), sample: fn(String) -> String) {
+    case parent {
+      Some(parent) if parent.relation.field == f.0 -> "json.int(" <> f.0 <> ")"
+      _ -> sample(f.1)
+    }
+  }
 
   let db_imports = case db {
     Postgres -> "\nimport gleam/erlang/process\nimport pog"
@@ -3034,9 +3199,27 @@ fn api_resource_test(
   let valid_fields =
     fields
     |> list.map(fn(f) {
-      "    #(\"" <> f.0 <> "\", " <> api_sample_json(f.1) <> "),"
+      "    #(\"" <> f.0 <> "\", " <> json_value(f, api_sample_json) <> "),"
     })
     |> string.join("\n")
+
+  let updated_fields =
+    fields
+    |> list.map(fn(f) {
+      "    #(\"" <> f.0 <> "\", " <> json_value(f, api_updated_json) <> "),"
+    })
+    |> string.join("\n")
+
+  // The updated value of the first field, as the JSON response shows it
+  let updated_check = case fields {
+    [#(name, field_type), ..] -> "
+  simulate.read_body(updated)
+  |> string.contains(" <> string.inspect(
+        "\"" <> name <> "\":" <> api_updated_json_text(field_type),
+      ) <> ")
+  |> should.be_true"
+    [] -> ""
+  }
 
   let validation_tests = case api_required_fields(fields) {
     [] -> ""
@@ -3087,29 +3270,34 @@ pub fn create_with_wrong_field_type_returns_400_test() {
 
   "//// Tests for the " <> resource_plural <> " JSON API.
 ////
-//// These cover what a handler answers before it reaches the database:
-//// malformed and invalid bodies, and ids that are not numbers. Creating,
-//// updating and deleting rows needs a migrated database; try those
-//// against the running app (`refrakt migrate`, then curl " <> path <> ").
+//// Most cover what a handler answers before it reaches the database:
+//// malformed and invalid bodies, and ids that are not numbers. The tests
+//// at the end create, update, delete and page through rows on the test
+//// database (test/" <> app_name <> "/support/test_db.gleam).
 
 import gleam/dynamic/decode
 import gleam/http
-import gleam/json" <> db_imports <> "
+import gleam/http/response
+import gleam/json
+import gleam/list
+import gleam/string" <> db_imports <> "
 import gleeunit/should
 import " <> app_name <> "/config
 import " <> app_name <> "/context.{type Context, Context}
+import " <> app_name <> "/router
+import " <> app_name <> "/support/test_db
 import " <> app_name <> "/web/forms/" <> form <> "
-import " <> app_name <> "/web/" <> handler <> "
+import " <> app_name <> "/web/" <> handler <> parent_imports <> "
 import refrakt/testing
 import wisp/simulate
 
-/// A context whose database these tests never reach.
+/// A context whose database the tests that do not use test_db never reach.
 fn test_context() -> Context {
   let assert Ok(cfg) = config.load()
   Context(config: cfg, " <> test_db <> ")
 }
 
-fn valid_body() -> String {
+fn valid_body(" <> body_param <> ") -> String {
   json.object([
 " <> valid_fields <> "
   ])
@@ -3117,7 +3305,7 @@ fn valid_body() -> String {
 }
 
 pub fn decode_json_accepts_a_valid_body_test() {
-  let assert Ok(data) = json.parse(valid_body(), decode.dynamic)
+  let assert Ok(data) = json.parse(valid_body(" <> static_arg <> "), decode.dynamic)
 
   " <> form <> ".decode_json(data)
   |> should.be_ok
@@ -3141,7 +3329,7 @@ pub fn update_with_malformed_json_returns_400_test() {
 
 pub fn update_unknown_id_returns_404_test() {
   let response =
-    testing.json_request(http.Put, \"" <> path <> "/unknown\", valid_body())
+    testing.json_request(http.Put, \"" <> path <> "/unknown\", valid_body(" <> static_arg <> "))
     |> " <> handler <> ".update(test_context(), \"unknown\")
 
   response.status |> should.equal(404)
@@ -3162,7 +3350,158 @@ pub fn delete_unknown_id_returns_404_test() {
 
   response.status |> should.equal(404)
 }
+
+// -- Against the test database -------------------------------------------
+
+pub fn create_show_update_delete_test() {
+  use ctx <- test_db.with_context()" <> parent_setup <> "
+
+  let created =
+    testing.json_request(http.Post, \"" <> path <> "\", valid_body(" <> db_arg <> "))
+    |> router.handle_request(ctx)
+  created.status |> should.equal(201)
+  let assert Ok(path) = response.get_header(created, \"location\")
+
+  let shown = simulate.request(http.Get, path) |> router.handle_request(ctx)
+  shown.status |> should.equal(200)
+
+  let updated =
+    testing.json_request(http.Put, path, updated_body(" <> db_arg <> "))
+    |> router.handle_request(ctx)
+  updated.status |> should.equal(200)" <> updated_check <> "
+
+  let deleted = simulate.request(http.Delete, path) |> router.handle_request(ctx)
+  deleted.status |> should.equal(204)
+  let gone = simulate.request(http.Get, path) |> router.handle_request(ctx)
+  gone.status |> should.equal(404)
+}
+
+pub fn index_is_paginated_test() {
+  use ctx <- test_db.with_context()" <> parent_setup <> "
+  list.repeat(Nil, 3)
+  |> list.each(fn(_) {
+    let created =
+      testing.json_request(http.Post, \"" <> path <> "\", valid_body(" <> db_arg <> "))
+      |> router.handle_request(ctx)
+    created.status |> should.equal(201)
+  })
+
+  // #(items on the page, per_page, total)
+  index_page(\"" <> path <> "\", ctx)
+  |> should.equal(#(3, " <> handler <> ".per_page, 3))
+  index_page(\"" <> path <> "?per_page=2\", ctx) |> should.equal(#(2, 2, 3))
+  index_page(\"" <> path <> "?page=2&per_page=2\", ctx)
+  |> should.equal(#(1, 2, 3))
+  index_page(\"" <> path <> "?page=3&per_page=2\", ctx)
+  |> should.equal(#(0, 2, 3))
+}
+
+/// How many items an index page holds, its per_page and the total.
+fn index_page(path: String, ctx: Context) -> #(Int, Int, Int) {
+  let response = simulate.request(http.Get, path) |> router.handle_request(ctx)
+  response.status |> should.equal(200)
+  let decoder = {
+    use data <- decode.field(\"data\", decode.list(decode.dynamic))
+    use per_page <- decode.field(\"per_page\", decode.int)
+    use total <- decode.field(\"total\", decode.int)
+    decode.success(#(list.length(data), per_page, total))
+  }
+  let assert Ok(page) = json.parse(simulate.read_body(response), decoder)
+  page
+}
+
+fn updated_body(" <> body_param <> ") -> String {
+  json.object([
+" <> updated_fields <> "
+  ])
+  |> json.to_string
+}" <> parent_fn <> "
 "
+}
+
+/// A parent row for the DB-backed tests of a `--belongs-to` resource.
+type ParentFixture {
+  ParentFixture(
+    relation: Relation,
+    /// `fn create_<parent>(ctx: Context) -> Int` and the imports it needs
+    create_fn: String,
+    imports: String,
+  )
+}
+
+/// Build the parent of the generated tests from the parent's params type
+/// (`web/forms/<parent>_form.gleam`): a placeholder per field, `None` for
+/// optional ones. `None` when the params type cannot be read.
+fn parent_fixture(
+  app: String,
+  relation: Relation,
+  db: DbChoice,
+) -> Option(ParentFixture) {
+  let form = relation.singular <> "_form"
+  let params = relation.type_name <> "Params"
+  let path = "src/" <> app <> "/web/forms/" <> form <> ".gleam"
+  let db_arg = case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
+  let fields = {
+    use content <- result.try(
+      simplifile.read(path) |> result.replace_error(Nil),
+    )
+    use #(_, after) <- result.try(string.split_once(
+      content,
+      "pub type " <> params <> " {",
+    ))
+    use #(_, after) <- result.try(string.split_once(after, "("))
+    use #(body, _) <- result.try(string.split_once(after, "\n}"))
+    body
+    |> string.trim
+    |> string.drop_end(1)
+    |> string.split(",")
+    |> list.filter(fn(field) { string.trim(field) != "" })
+    |> list.try_map(fn(field) {
+      use #(name, gleam_type) <- result.try(string.split_once(field, ":"))
+      let value = case string.trim(gleam_type) {
+        // also a valid date and timestamp
+        "String" -> "\"2026-01-01\""
+        "Int" -> "1"
+        "Float" -> "1.0"
+        "Bool" -> "True"
+        "Option(" <> _ -> "option.None"
+        _ -> ""
+      }
+      case value {
+        "" -> Error(Nil)
+        _ -> Ok(string.trim(name) <> ": " <> value)
+      }
+    })
+  }
+  case fields {
+    Error(_) -> None
+    Ok(fields) -> {
+      let args = string.join(fields, ", ")
+      let option_import = case string.contains(args, "option.None") {
+        True -> "\nimport gleam/option"
+        False -> ""
+      }
+      Some(ParentFixture(relation: relation, create_fn: "
+
+/// A " <> relation.singular <> " for the records to belong to.
+fn create_" <> relation.singular <> "(ctx: Context) -> Int {
+  let assert Ok(" <> relation.singular <> ") =
+    " <> relation.singular <> "_repo.create(" <> db_arg <> ", " <> form <> "." <> params <> "(" <> args <> "))
+  " <> relation.singular <> ".id
+}", imports: option_import
+        <> "\nimport "
+        <> app
+        <> "/data/"
+        <> relation.singular
+        <> "_repo\nimport "
+        <> app
+        <> "/web/forms/"
+        <> form))
+    }
+  }
 }
 
 fn resource_test(
@@ -3172,7 +3511,37 @@ fn resource_test(
   fields: List(#(String, String)),
   db: DbChoice,
   rerender_test: Bool,
+  parent: Option(ParentFixture),
 ) -> String {
+  // With a --belongs-to parent, the DB-backed tests create one and send
+  // its id instead of the sample value
+  let #(parent_setup, with_parent, sample_fields, parent_fn, parent_imports) = case
+    parent
+  {
+    None -> #("", fn(values: String) { values }, fields, "", "")
+    Some(parent) -> {
+      let field = parent.relation.field
+      #(
+        "\n  let "
+          <> field
+          <> " = create_"
+          <> parent.relation.singular
+          <> "(ctx)",
+        fn(values: String) {
+          "[#(\""
+          <> field
+          <> "\", int.to_string("
+          <> field
+          <> ")), .."
+          <> values
+          <> "]"
+        },
+        list.filter(fields, fn(f) { f.0 != field }),
+        parent.create_fn,
+        "\nimport gleam/int" <> parent.imports,
+      )
+    }
+  }
   // Build valid form data for decode test
   let valid_values =
     fields
@@ -3225,12 +3594,117 @@ pub fn same_origin_invalid_create_rerenders_form_test() {
 
   let #(context_imports, context_value) = templates.test_context(db)
 
+  // The show page's heading is the first field; check it when it is text.
+  let #(created_check, updated_check) = case fields {
+    [#(_, "string"), ..] | [#(_, "text"), ..] -> #(
+      "
+  simulate.read_body(shown)
+  |> string.contains(\"test value\")
+  |> should.be_true",
+      "
+  get(path, ctx)
+  |> simulate.read_body
+  |> string.contains(\"updated value\")
+  |> should.be_true",
+    )
+    _ -> #("", "")
+  }
+
+  let handler = resource_singular <> "_handler"
+  let path = "/" <> resource_plural
+
+  let db_tests = "
+// -- Against the test database: test/" <> app_name <> "/support/test_db.gleam --
+
+pub fn create_show_update_delete_test() {
+  use ctx <- test_db.with_context()" <> parent_setup <> "
+
+  let created =
+    simulate.browser_request(http.Post, \"" <> path <> "\")
+    |> simulate.form_body(" <> with_parent("form_values()") <> ")
+    |> router.handle_request(ctx)
+  created.status |> should.equal(303)
+  let assert Ok(path) = response.get_header(created, \"location\")
+
+  let shown = get(path, ctx)
+  shown.status |> should.equal(200)" <> created_check <> "
+
+  let updated =
+    simulate.browser_request(http.Put, path)
+    |> simulate.form_body(" <> with_parent("updated_form_values()") <> ")
+    |> router.handle_request(ctx)
+  updated.status |> should.equal(303)" <> updated_check <> "
+
+  let deleted =
+    simulate.browser_request(http.Delete, path)
+    |> router.handle_request(ctx)
+  deleted.status |> should.equal(303)
+  get(path, ctx).status |> should.equal(404)
+}
+
+pub fn index_is_paginated_test() {
+  use ctx <- test_db.with_context()" <> parent_setup <> "
+  // One more than fits on a page
+  list.repeat(Nil, " <> handler <> ".per_page + 1)
+  |> list.each(fn(_) {
+    let created =
+      simulate.browser_request(http.Post, \"" <> path <> "\")
+      |> simulate.form_body(" <> with_parent("form_values()") <> ")
+      |> router.handle_request(ctx)
+    created.status |> should.equal(303)
+  })
+
+  let first = get(\"" <> path <> "\", ctx) |> simulate.read_body
+  count_items(first) |> should.equal(" <> handler <> ".per_page)
+  string.contains(first, \"Page 1 of 2\") |> should.be_true
+  string.contains(first, \"href=\\\"" <> path <> "?page=2\\\"\") |> should.be_true
+
+  let second = get(\"" <> path <> "?page=2\", ctx) |> simulate.read_body
+  count_items(second) |> should.equal(1)
+  string.contains(second, \"Page 2 of 2\") |> should.be_true
+  string.contains(second, \"href=\\\"" <> path <> "?page=1\\\"\") |> should.be_true
+
+  // A page number that is not one shows the first page
+  get(\"" <> path <> "?page=-1\", ctx)
+  |> simulate.read_body
+  |> string.contains(\"Page 1 of 2\")
+  |> should.be_true
+}
+
+fn get(path: String, ctx: Context) -> wisp.Response {
+  simulate.browser_request(http.Get, path)
+  |> router.handle_request(ctx)
+}
+
+/// How many items an index page lists.
+fn count_items(html: String) -> Int {
+  list.length(string.split(html, \"<li>\")) - 1
+}
+
+fn form_values() -> List(#(String, String)) {
+  [
+" <> sample_form_values(sample_fields, False) <> "
+  ]
+}
+
+fn updated_form_values() -> List(#(String, String)) {
+  [
+" <> sample_form_values(sample_fields, True) <> "
+  ]
+}" <> parent_fn <> "
+"
+
   "import gleam/http
+import gleam/http/response
+import gleam/list
+import gleam/string
 import gleeunit/should
 import " <> app_name <> "/config
 import " <> app_name <> "/context.{type Context}
 import " <> app_name <> "/router
-import " <> app_name <> "/web/forms/" <> resource_singular <> "_form" <> context_imports <> "
+import " <> app_name <> "/support/test_db
+import " <> app_name <> "/web/" <> handler <> "
+import " <> app_name <> "/web/forms/" <> resource_singular <> "_form" <> context_imports <> parent_imports <> "
 import wisp
 import wisp/simulate
 
@@ -3264,11 +3738,76 @@ pub fn cross_site_create_is_rejected_test() {
   |> should.equal(403)
 }
 " <> missing_field_tests <> "
+/// A context whose database the tests above never reach.
 fn test_context() -> Context {
   let assert Ok(cfg) = config.load()
   " <> context_value <> "
 }
-"
+" <> db_tests
+}
+
+/// Write `test/<app>/support/test_db.gleam` unless the app has one.
+/// Returns its path when it was created.
+fn ensure_test_db(app: String, db: DbChoice) -> Result(String, Nil) {
+  let path = "test/" <> app <> "/support/test_db.gleam"
+  case simplifile.is_file(path) {
+    Ok(True) -> Error(Nil)
+    _ -> {
+      let _ = simplifile.create_directory_all("test/" <> app <> "/support")
+      let assert Ok(_) =
+        simplifile.write(path, templates.test_db_module(app, db))
+      Ok(path)
+    }
+  }
+}
+
+/// A form value the generated form accepts for a field, for the tests
+/// that create and update rows. `updated` gives a different one.
+fn sample_form_value(field_type: String, updated: Bool) -> String {
+  case field_type, updated {
+    "optional(bool)", False -> "true"
+    "optional(bool)", True -> "false"
+    _, _ -> plain_sample_form_value(unwrap_optional(field_type), updated)
+  }
+}
+
+fn plain_sample_form_value(field_type: String, updated: Bool) -> String {
+  case field_type, updated {
+    "bool", _ -> "on"
+    "int", False -> "42"
+    "int", True -> "7"
+    "float", False -> "3.14"
+    "float", True -> "2.5"
+    "date", False -> "2026-01-01"
+    "date", True -> "2026-02-02"
+    "datetime", False -> "2026-01-01T00:00:00Z"
+    "datetime", True -> "2026-02-02T00:00:00Z"
+    _, False -> "test value"
+    _, True -> "updated value"
+  }
+}
+
+/// `optional(int)` is `int`; other types are themselves.
+fn unwrap_optional(field_type: String) -> String {
+  case
+    string.starts_with(field_type, "optional("),
+    string.ends_with(field_type, ")")
+  {
+    True, True -> field_type |> string.drop_start(9) |> string.drop_end(1)
+    _, _ -> field_type
+  }
+}
+
+/// The form values of a resource, as Gleam list items.
+fn sample_form_values(
+  fields: List(#(String, String)),
+  updated: Bool,
+) -> String {
+  fields
+  |> list.map(fn(f) {
+    "    #(\"" <> f.0 <> "\", \"" <> sample_form_value(f.1, updated) <> "\"),"
+  })
+  |> string.join("\n")
 }
 
 // =============================================================================
@@ -4261,10 +4800,17 @@ pub fn require_auth(
 
 fn auth_test(app: String) -> String {
   "import argus
+import gleam/http
+import gleam/list
 import gleam/string
 import gleeunit/should
+import " <> app <> "/context.{type Context}
 import " <> app <> "/domain/auth
 import " <> app <> "/domain/user.{User}
+import " <> app <> "/router
+import " <> app <> "/support/test_db
+import wisp
+import wisp/simulate
 
 pub fn hash_password_round_trip_test() {
   let assert Ok(hash) = auth.hash_password(\"secret123\")
@@ -4321,6 +4867,62 @@ pub fn authenticate_rejects_a_wrong_password_test() {
 pub fn authenticate_rejects_an_unknown_user_test() {
   auth.authenticate(Error(Nil), \"secret123\")
   |> should.be_error
+}
+
+// -- Against the test database: test/" <> app <> "/support/test_db.gleam --
+
+const email = \"someone@example.com\"
+
+const password = \"correct horse battery staple\"
+
+pub fn register_then_log_in_test() {
+  use ctx <- test_db.with_context()
+
+  let registered = register(ctx, email, password)
+  registered.status |> should.equal(303)
+  has_session_cookie(registered) |> should.be_true
+
+  let logged_in = log_in(ctx, email, password)
+  logged_in.status |> should.equal(303)
+  has_session_cookie(logged_in) |> should.be_true
+
+  let rejected = log_in(ctx, email, \"wrong password\")
+  rejected.status |> should.equal(422)
+  has_session_cookie(rejected) |> should.be_false
+
+  log_in(ctx, \"nobody@example.com\", password).status
+  |> should.equal(422)
+}
+
+pub fn register_with_a_taken_email_test() {
+  use ctx <- test_db.with_context()
+
+  register(ctx, email, password).status |> should.equal(303)
+  // On Postgres the failed INSERT ends the test's transaction, so it
+  // comes last.
+  register(ctx, email, password).status |> should.equal(422)
+}
+
+fn register(ctx: Context, email: String, password: String) -> wisp.Response {
+  simulate.browser_request(http.Post, \"/register\")
+  |> simulate.form_body([
+    #(\"email\", email),
+    #(\"password\", password),
+    #(\"password_confirmation\", password),
+  ])
+  |> router.handle_request(ctx)
+}
+
+fn log_in(ctx: Context, email: String, password: String) -> wisp.Response {
+  simulate.browser_request(http.Post, \"/login\")
+  |> simulate.form_body([#(\"email\", email), #(\"password\", password)])
+  |> router.handle_request(ctx)
+}
+
+fn has_session_cookie(response: wisp.Response) -> Bool {
+  list.any(response.headers, fn(header) {
+    header.0 == \"set-cookie\" && string.starts_with(header.1, \"_session=\")
+  })
 }
 "
 }
