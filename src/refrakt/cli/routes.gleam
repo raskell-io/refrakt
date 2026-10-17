@@ -24,7 +24,7 @@ pub fn run() {
   }
 }
 
-fn extract_routes(content: String) -> List(String) {
+pub fn extract_routes(content: String) -> List(String) {
   content
   |> string.split("\n")
   |> list.filter_map(fn(line) {
@@ -36,7 +36,7 @@ fn extract_routes(content: String) -> List(String) {
   })
 }
 
-fn parse_route_line(line: String) -> Result(String, Nil) {
+pub fn parse_route_line(line: String) -> Result(String, Nil) {
   // Match patterns like: [], http.Get -> home_handler.index(req, ctx)
   // or: ["posts"], http.Get -> post_handler.index(req, ctx)
   case string.split_once(line, " -> ") {
@@ -78,32 +78,38 @@ fn extract_method(pattern: String) -> String {
   }
 }
 
-fn extract_path(pattern: String) -> String {
+pub fn extract_path(pattern: String) -> String {
   // Parse the list pattern to build the path
   case string.split_once(pattern, "],") {
     Error(_) -> "/"
     Ok(#(list_part, _)) -> {
       let trimmed = string.trim(list_part)
       case trimmed {
-        "[]" -> "/"
+        "[]" | "[" -> "/"
         _ -> {
           // Remove leading [ and parse segments
           let inner =
             trimmed
             |> string.drop_start(1)
-          let segments =
-            inner
-            |> string.split(",")
-            |> list.map(fn(s) {
-              let s = string.trim(s)
-              case string.starts_with(s, "\"") {
-                True ->
-                  s
-                  |> string.replace("\"", "")
-                False -> ":" <> s
-              }
-            })
-          "/" <> string.join(segments, "/")
+            |> string.trim
+          case inner {
+            "" -> "/"
+            _ -> {
+              let segments =
+                inner
+                |> string.split(",")
+                |> list.map(fn(s) {
+                  let s = string.trim(s)
+                  case string.starts_with(s, "\"") {
+                    True ->
+                      s
+                      |> string.replace("\"", "")
+                    False -> ":" <> s
+                  }
+                })
+              "/" <> string.join(segments, "/")
+            }
+          }
         }
       }
     }
