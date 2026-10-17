@@ -95,6 +95,34 @@ testing.assert_status(response, 200)
 testing.assert_header(response, "content-type", "text/html")
 ```
 
+`testing.json_request` builds a `wisp.Request` with a JSON body and
+`content-type: application/json`, ready to pass to a handler. The body
+is a string, so you can send malformed JSON too:
+
+```gleam
+import gleam/http
+import gleam/json
+import refrakt/testing
+import wisp/simulate
+
+pub fn create_with_blank_title_returns_422_test() {
+  let body = json.object([#("title", json.string(""))]) |> json.to_string
+
+  let response =
+    testing.json_request(http.Post, "/api/posts", body)
+    |> post_handler.create(test_context())
+
+  response.status |> should.equal(422)
+  simulate.read_body(response)
+  |> string.contains("Title is required")
+  |> should.be_true
+}
+```
+
+`refrakt gen resource ... --api` generates tests like this for each
+resource. They stop before the database (bad bodies, ids that are not
+numbers), so they pass without one.
+
 ## Writing handler tests
 
 To test a handler directly, you need a `Context` and a request.
