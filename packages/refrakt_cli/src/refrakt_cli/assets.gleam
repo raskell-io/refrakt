@@ -1,7 +1,8 @@
-/// `refrakt assets` — set up and build CSS/JS assets.
-///
-/// Configures Tailwind CSS and esbuild for the project.
-///
+//// `refrakt assets` — set up and build CSS/JS assets.
+////
+//// Configures Tailwind CSS and esbuild for the project.
+////
+
 import gleam/io
 import gleam/string
 import simplifile

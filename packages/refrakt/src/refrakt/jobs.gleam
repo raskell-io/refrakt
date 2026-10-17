@@ -1,31 +1,35 @@
-/// Background job processing using OTP processes.
-///
-/// Run expensive work outside the request cycle — emails, image
-/// processing, reports, webhooks.
-///
-/// ## Usage
-///
-/// ```gleam
-/// import refrakt/jobs
-///
-/// // Start the job runner
-/// let assert Ok(runner) = jobs.start(max_concurrency: 10)
-///
-/// // Enqueue a job
-/// jobs.enqueue(runner, fn() {
-///   // Send welcome email, process image, etc.
-///   mailer.deliver(email, adapter)
-/// })
-///
-/// // Enqueue with a name (for logging)
-/// jobs.enqueue_named(runner, "send_welcome_email", fn() {
-///   mailer.deliver(email, adapter)
-/// })
-/// ```
-///
-/// At most `max_concurrency` jobs run at once; further jobs wait in a
-/// queue. A job that crashes is logged and does not affect the runner.
-///
+//// Background job processing using OTP processes.
+////
+//// **Experimental.** This module is lightly used and may change or move
+//// to its own package; see https://github.com/raskell-io/refrakt/issues/28.
+////
+//// Run expensive work outside the request cycle — emails, image
+//// processing, reports, webhooks.
+////
+//// ## Usage
+////
+//// ```gleam
+//// import refrakt/jobs
+////
+//// // Start the job runner
+//// let assert Ok(runner) = jobs.start(max_concurrency: 10)
+////
+//// // Enqueue a job
+//// jobs.enqueue(runner, fn() {
+////   // Send welcome email, process image, etc.
+////   mailer.deliver(email, adapter)
+//// })
+////
+//// // Enqueue with a name (for logging)
+//// jobs.enqueue_named(runner, "send_welcome_email", fn() {
+////   mailer.deliver(email, adapter)
+//// })
+//// ```
+////
+//// At most `max_concurrency` jobs run at once; further jobs wait in a
+//// queue. A job that crashes is logged and does not affect the runner.
+////
+
 import exception
 import gleam/erlang/process.{type Subject}
 import gleam/io

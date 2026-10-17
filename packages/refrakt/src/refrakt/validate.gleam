@@ -1,18 +1,19 @@
-/// Form validation helpers.
-///
-/// All validators are composable functions that accumulate errors as
-/// `List(#(String, String))` where each tuple is `#(field_name, message)`.
-///
-/// ## Example
-///
-/// ```gleam
-/// let errors =
-///   []
-///   |> validate.required(title, "title", "Title is required")
-///   |> validate.min_length(title, "title", 3, "Title must be at least 3 characters")
-///   |> validate.required(body, "body", "Body is required")
-/// ```
-///
+//// Form validation helpers.
+////
+//// All validators are composable functions that accumulate errors as
+//// `List(#(String, String))` where each tuple is `#(field_name, message)`.
+////
+//// ## Example
+////
+//// ```gleam
+//// let errors =
+////   []
+////   |> validate.required(title, "title", "Title is required")
+////   |> validate.min_length(title, "title", 3, "Title must be at least 3 characters")
+////   |> validate.required(body, "body", "Body is required")
+//// ```
+////
+
 import gleam/list
 import gleam/string
 

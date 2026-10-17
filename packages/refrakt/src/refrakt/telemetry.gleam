@@ -1,27 +1,31 @@
-/// Basic telemetry and request metrics.
-///
-/// Tracks request counts, response times, and error rates.
-/// Use as middleware to collect metrics automatically.
-///
-/// ## Usage
-///
-/// ```gleam
-/// import refrakt/telemetry
-///
-/// // Start the metrics collector
-/// let assert Ok(metrics) = telemetry.start()
-///
-/// // Add to middleware
-/// fn middleware(req, next) {
-///   use <- telemetry.track(req, metrics)
-///   next(req)
-/// }
-///
-/// // Get current metrics
-/// let stats = telemetry.get_stats(metrics)
-/// // stats.total_requests, stats.avg_response_ms, etc.
-/// ```
-///
+//// Basic telemetry and request metrics.
+////
+//// **Experimental.** This module is lightly used and may change or move
+//// to its own package; see https://github.com/raskell-io/refrakt/issues/28.
+////
+//// Tracks request counts, response times, and error rates.
+//// Use as middleware to collect metrics automatically.
+////
+//// ## Usage
+////
+//// ```gleam
+//// import refrakt/telemetry
+////
+//// // Start the metrics collector
+//// let assert Ok(metrics) = telemetry.start()
+////
+//// // Add to middleware
+//// fn middleware(req, next) {
+////   use <- telemetry.track(req, metrics)
+////   next(req)
+//// }
+////
+//// // Get current metrics
+//// let stats = telemetry.get_stats(metrics)
+//// // stats.total_requests, stats.avg_response_ms, etc.
+//// ```
+////
+
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/otp/actor

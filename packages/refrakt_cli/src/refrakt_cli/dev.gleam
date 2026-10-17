@@ -1,9 +1,10 @@
-/// `refrakt dev` — start the dev server with file watching.
-///
-/// Sets APP_ENV=dev and runs `gleam run`. On file change, rebuilds
-/// and restarts automatically using fswatch if available, otherwise
-/// runs once.
-///
+//// `refrakt dev` — start the dev server with file watching.
+////
+//// Sets APP_ENV=dev and runs `gleam run`. On file change, rebuilds
+//// and restarts automatically using fswatch if available, otherwise
+//// runs once.
+////
+
 import gleam/io
 
 @external(erlang, "refrakt_cli_dev_ffi", "run_dev")

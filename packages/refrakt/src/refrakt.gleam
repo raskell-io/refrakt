@@ -1,8 +1,9 @@
-/// Refrakt — A convention-first web framework for Gleam.
-///
-/// This module re-exports the core helpers used by generated projects:
-/// validation, flash messages, and test utilities.
-///
+//// Refrakt — A convention-first web framework for Gleam.
+////
+//// This module re-exports the core helpers used by generated projects:
+//// validation, flash messages, and test utilities.
+////
+
 import refrakt/flash
 import refrakt/validate
 

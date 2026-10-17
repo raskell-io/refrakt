@@ -1,5 +1,6 @@
-/// `refrakt routes` — print the route table from router.gleam.
-///
+//// `refrakt routes` — print the route table from router.gleam.
+////
+
 import gleam/io
 import gleam/list
 import gleam/string

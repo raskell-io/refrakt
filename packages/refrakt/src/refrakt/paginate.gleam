@@ -1,33 +1,34 @@
-/// Pagination helpers for list views.
-///
-/// ## Usage in a handler
-///
-/// ```gleam
-/// import refrakt/paginate
-///
-/// pub fn index(req: Request, ctx: Context) -> Response {
-///   let params = paginate.from_request(req)
-///   let posts = post_repo.list_paginated(ctx.db, params)
-///   let page = paginate.page(posts, params, total_count)
-///
-///   post_views.index_view(page)
-///   |> root_layout.wrap("Posts")
-///   |> wisp.html_response(200)
-/// }
-/// ```
-///
-/// ## Usage in a repo
-///
-/// ```gleam
-/// pub fn list_paginated(db, params: paginate.Params) -> List(Post) {
-///   let offset = paginate.offset(params)
-///   pog.query("SELECT ... LIMIT $1 OFFSET $2")
-///   |> pog.parameter(pog.int(params.per_page))
-///   |> pog.parameter(pog.int(offset))
-///   ...
-/// }
-/// ```
-///
+//// Pagination helpers for list views.
+////
+//// ## Usage in a handler
+////
+//// ```gleam
+//// import refrakt/paginate
+////
+//// pub fn index(req: Request, ctx: Context) -> Response {
+////   let params = paginate.from_request(req)
+////   let posts = post_repo.list_paginated(ctx.db, params)
+////   let page = paginate.page(posts, params, total_count)
+////
+////   post_views.index_view(page)
+////   |> root_layout.wrap("Posts")
+////   |> wisp.html_response(200)
+//// }
+//// ```
+////
+//// ## Usage in a repo
+////
+//// ```gleam
+//// pub fn list_paginated(db, params: paginate.Params) -> List(Post) {
+////   let offset = paginate.offset(params)
+////   pog.query("SELECT ... LIMIT $1 OFFSET $2")
+////   |> pog.parameter(pog.int(params.per_page))
+////   |> pog.parameter(pog.int(offset))
+////   ...
+//// }
+//// ```
+////
+
 import gleam/int
 import gleam/list
 import gleam/option

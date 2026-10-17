@@ -1,25 +1,29 @@
-/// Topic-based publish/subscribe for real-time messaging.
-///
-/// A single OTP actor tracks subscribers per topic and dispatches messages.
-///
-/// ## Usage
-///
-/// ```gleam
-/// // Start the PubSub system
-/// let assert Ok(ps) = pubsub.start()
-///
-/// // Subscribe to a topic
-/// let subject = process.new_subject()
-/// pubsub.subscribe(ps, "chat:lobby", subject)
-///
-/// // Publish a message
-/// pubsub.broadcast(ps, "chat:lobby", "Hello everyone!")
-///
-/// // All subscribers on "chat:lobby" receive the message
-/// let assert Ok(msg) = process.receive(subject, 1000)
-/// // msg == "Hello everyone!"
-/// ```
-///
+//// Topic-based publish/subscribe for real-time messaging.
+////
+//// **Experimental.** This module is lightly used and may change or move
+//// to its own package; see https://github.com/raskell-io/refrakt/issues/28.
+////
+//// A single OTP actor tracks subscribers per topic and dispatches messages.
+////
+//// ## Usage
+////
+//// ```gleam
+//// // Start the PubSub system
+//// let assert Ok(ps) = pubsub.start()
+////
+//// // Subscribe to a topic
+//// let subject = process.new_subject()
+//// pubsub.subscribe(ps, "chat:lobby", subject)
+////
+//// // Publish a message
+//// pubsub.broadcast(ps, "chat:lobby", "Hello everyone!")
+////
+//// // All subscribers on "chat:lobby" receive the message
+//// let assert Ok(msg) = process.receive(subject, 1000)
+//// // msg == "Hello everyone!"
+//// ```
+////
+
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/list

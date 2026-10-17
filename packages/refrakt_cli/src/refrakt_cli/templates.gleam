@@ -1,8 +1,9 @@
-/// File templates for code generation.
-///
-/// Each function returns the complete file content as a String.
-/// Templates use string concatenation — no macros, no interpolation engine.
-///
+//// File templates for code generation.
+////
+//// Each function returns the complete file content as a String.
+//// Templates use string concatenation — no macros, no interpolation engine.
+////
+
 import gleam/string
 import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 

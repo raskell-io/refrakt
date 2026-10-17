@@ -1,7 +1,8 @@
-/// `refrakt seed` — run database seeds.
-///
-/// Generates a seed module if it doesn't exist, then runs it.
-///
+//// `refrakt seed` — run database seeds.
+////
+//// Generates a seed module if it doesn't exist, then runs it.
+////
+
 import gleam/io
 import refrakt_cli/format
 import refrakt_cli/project

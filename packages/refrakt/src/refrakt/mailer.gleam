@@ -1,24 +1,28 @@
-/// Email sending abstraction.
-///
-/// Provides a simple interface for sending emails. In development,
-/// emails are logged to the console. In production, plug in an
-/// SMTP or API-based adapter.
-///
-/// ## Usage
-///
-/// ```gleam
-/// import refrakt/mailer
-///
-/// let email = mailer.new()
-///   |> mailer.to("user@example.com")
-///   |> mailer.from("noreply@myapp.com")
-///   |> mailer.subject("Welcome!")
-///   |> mailer.text_body("Thanks for signing up.")
-///   |> mailer.html_body("<h1>Welcome!</h1>")
-///
-/// mailer.deliver(email, mailer.log_adapter())
-/// ```
-///
+//// Email sending abstraction.
+////
+//// **Experimental.** This module is lightly used and may change or move
+//// to its own package; see https://github.com/raskell-io/refrakt/issues/28.
+////
+//// Provides a simple interface for sending emails. In development,
+//// emails are logged to the console. In production, plug in an
+//// SMTP or API-based adapter.
+////
+//// ## Usage
+////
+//// ```gleam
+//// import refrakt/mailer
+////
+//// let email = mailer.new()
+////   |> mailer.to("user@example.com")
+////   |> mailer.from("noreply@myapp.com")
+////   |> mailer.subject("Welcome!")
+////   |> mailer.text_body("Thanks for signing up.")
+////   |> mailer.html_body("<h1>Welcome!</h1>")
+////
+//// mailer.deliver(email, mailer.log_adapter())
+//// ```
+////
+
 import gleam/io
 import gleam/string
 

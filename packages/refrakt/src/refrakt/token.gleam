@@ -1,22 +1,23 @@
-/// Secure, signed, expiring tokens for email verification,
-/// password reset, API authentication, and similar flows.
-///
-/// ## Usage
-///
-/// ```gleam
-/// import refrakt/token
-///
-/// // Sign a token (e.g., user ID for email verification)
-/// let tok = token.sign(secret, "user:verify", "42", max_age_seconds: 3600)
-///
-/// // Verify and extract the data
-/// case token.verify(secret, "user:verify", tok, max_age_seconds: 3600) {
-///   Ok(data) -> // data == "42"
-///   Error(token.Expired) -> // token expired
-///   Error(token.Invalid) -> // signature mismatch or tampered
-/// }
-/// ```
-///
+//// Secure, signed, expiring tokens for email verification,
+//// password reset, API authentication, and similar flows.
+////
+//// ## Usage
+////
+//// ```gleam
+//// import refrakt/token
+////
+//// // Sign a token (e.g., user ID for email verification)
+//// let tok = token.sign(secret, "user:verify", "42", max_age_seconds: 3600)
+////
+//// // Verify and extract the data
+//// case token.verify(secret, "user:verify", tok, max_age_seconds: 3600) {
+////   Ok(data) -> // data == "42"
+////   Error(token.Expired) -> // token expired
+////   Error(token.Invalid) -> // signature mismatch or tampered
+//// }
+//// ```
+////
+
 import gleam/bit_array
 import gleam/crypto
 import gleam/int

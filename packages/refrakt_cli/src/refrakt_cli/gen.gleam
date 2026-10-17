@@ -1,5 +1,6 @@
-/// Code generators: page, resource, migration, auth.
-///
+//// Code generators: page, resource, migration, auth.
+////
+
 import gleam/int
 import gleam/io
 import gleam/list

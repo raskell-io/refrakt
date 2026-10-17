@@ -1,5 +1,6 @@
-/// `refrakt new <name>` — scaffold a new Refrakt project.
-///
+//// `refrakt new <name>` — scaffold a new Refrakt project.
+////
+
 import gleam/io
 import gleam/list
 import gleam/string

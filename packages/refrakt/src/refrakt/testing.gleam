@@ -1,19 +1,20 @@
-/// Test helpers for Refrakt applications.
-///
-/// Build test requests without a running HTTP server.
-///
-/// ## Example
-///
-/// ```gleam
-/// import refrakt/testing
-///
-/// pub fn index_returns_200_test() {
-///   let req = testing.get("/posts")
-///   let resp = post_handler.index(req, test_ctx())
-///   resp.status |> should.equal(200)
-/// }
-/// ```
-///
+//// Test helpers for Refrakt applications.
+////
+//// Build test requests without a running HTTP server.
+////
+//// ## Example
+////
+//// ```gleam
+//// import refrakt/testing
+////
+//// pub fn index_returns_200_test() {
+////   let req = testing.get("/posts")
+////   let resp = post_handler.index(req, test_ctx())
+////   resp.status |> should.equal(200)
+//// }
+//// ```
+////
+
 import gleam/http
 import gleam/http/request
 import gleam/http/response.{type Response}

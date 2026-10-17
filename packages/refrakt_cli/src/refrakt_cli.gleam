@@ -1,7 +1,8 @@
-/// Refrakt CLI entry point.
-///
-/// Run with: gleam run -m refrakt_cli -- <command>
-///
+//// Refrakt CLI entry point.
+////
+//// Run with: gleam run -m refrakt_cli -- <command>
+////
+
 import argv
 import gleam/io
 import gleam/string

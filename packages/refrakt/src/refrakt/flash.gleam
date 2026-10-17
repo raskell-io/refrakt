@@ -1,19 +1,20 @@
-/// Flash message helpers built on signed cookies.
-///
-/// Flash messages are short-lived messages shown once after a redirect.
-/// They are stored as signed cookies and cleared after reading.
-///
-/// ## Example
-///
-/// ```gleam
-/// // In a handler, after creating a post:
-/// wisp.redirect("/posts")
-/// |> flash.set_flash(req, "info", "Post created")
-///
-/// // In a layout or component:
-/// let message = flash.get_flash(req, "info")
-/// ```
-///
+//// Flash message helpers built on signed cookies.
+////
+//// Flash messages are short-lived messages shown once after a redirect.
+//// They are stored as signed cookies and cleared after reading.
+////
+//// ## Example
+////
+//// ```gleam
+//// // In a handler, after creating a post:
+//// wisp.redirect("/posts")
+//// |> flash.set_flash(req, "info", "Post created")
+////
+//// // In a layout or component:
+//// let message = flash.get_flash(req, "info")
+//// ```
+////
+
 import wisp.{type Request, type Response}
 
 /// Set a flash message on a response. Uses signed cookies with a short TTL.

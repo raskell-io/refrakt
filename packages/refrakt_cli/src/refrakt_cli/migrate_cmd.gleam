@@ -1,8 +1,9 @@
-/// `refrakt migrate` — generate and run a migration script.
-///
-/// Creates a `src/<app>/migrate.gleam` module that connects to the
-/// database and runs pending migrations, then executes it.
-///
+//// `refrakt migrate` — generate and run a migration script.
+////
+//// Creates a `src/<app>/migrate.gleam` module that connects to the
+//// database and runs pending migrations, then executes it.
+////
+
 import gleam/io
 import gleam/string
 import refrakt_cli/format

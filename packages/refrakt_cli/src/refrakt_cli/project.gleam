@@ -1,5 +1,6 @@
-/// Project utilities — reads gleam.toml to discover the app name and DB choice.
-///
+//// Project utilities — reads gleam.toml to discover the app name and DB choice.
+////
+
 import gleam/string
 import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 import simplifile

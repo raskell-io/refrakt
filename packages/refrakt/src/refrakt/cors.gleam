@@ -1,20 +1,24 @@
-/// CORS middleware for Refrakt applications.
-///
-/// ## Usage
-///
-/// ```gleam
-/// import refrakt/cors
-///
-/// fn middleware(req, next) {
-///   use <- cors.allow(
-///     req,
-///     origins: ["http://localhost:3000", "https://myapp.com"],
-///     methods: ["GET", "POST", "PUT", "DELETE"],
-///   )
-///   next(req)
-/// }
-/// ```
-///
+//// CORS middleware for Refrakt applications.
+////
+//// **Experimental.** This module is lightly used and may change or move
+//// to its own package; see https://github.com/raskell-io/refrakt/issues/28.
+////
+//// ## Usage
+////
+//// ```gleam
+//// import refrakt/cors
+////
+//// fn middleware(req, next) {
+////   use <- cors.allow(
+////     req,
+////     origins: ["http://localhost:3000", "https://myapp.com"],
+////     methods: ["GET", "POST", "PUT", "DELETE"],
+////   )
+////   next(req)
+//// }
+//// ```
+////
+
 import gleam/http
 import gleam/list
 import gleam/string

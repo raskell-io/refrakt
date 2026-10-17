@@ -1,8 +1,9 @@
-/// `refrakt build` — compile islands to JavaScript.
-///
-/// Finds all Lustre island modules in web/islands/, compiles them
-/// to JavaScript, and copies the output to priv/static/js/islands/.
-///
+//// `refrakt build` — compile islands to JavaScript.
+////
+//// Finds all Lustre island modules in web/islands/, compiles them
+//// to JavaScript, and copies the output to priv/static/js/islands/.
+////
+
 import gleam/io
 import gleam/list
 import gleam/string

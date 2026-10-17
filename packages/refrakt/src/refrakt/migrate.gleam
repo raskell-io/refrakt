@@ -1,21 +1,22 @@
-/// Migration runner for Refrakt applications.
-///
-/// Reads SQL files from a migrations directory, tracks applied migrations
-/// in a `_migrations` table, and runs pending ones in order.
-///
-/// ## Usage from CLI
-///
-/// ```
-/// refrakt migrate
-/// ```
-///
-/// ## Usage from code
-///
-/// ```gleam
-/// import refrakt/migrate
-/// migrate.run(db, "src/my_app/data/migrations")
-/// ```
-///
+//// Migration runner for Refrakt applications.
+////
+//// Reads SQL files from a migrations directory, tracks applied migrations
+//// in a `_migrations` table, and runs pending ones in order.
+////
+//// ## Usage from CLI
+////
+//// ```
+//// refrakt migrate
+//// ```
+////
+//// ## Usage from code
+////
+//// ```gleam
+//// import refrakt/migrate
+//// migrate.run(db, "src/my_app/data/migrations")
+//// ```
+////
+
 import gleam/int
 import gleam/io
 import gleam/list

@@ -1,27 +1,28 @@
-/// File upload handling.
-///
-/// Provides helpers for processing multipart file uploads from
-/// Wisp's form data.
-///
-/// ## Usage
-///
-/// ```gleam
-/// import refrakt/upload
-///
-/// pub fn create(req: Request, ctx: Context) -> Response {
-///   use form_data <- wisp.require_form(req)
-///
-///   case upload.get_file(form_data, "avatar") {
-///     Ok(file) -> {
-///       // Save to disk
-///       let assert Ok(path) = upload.save(file, to: "priv/uploads")
-///       // path is like "priv/uploads/abc123_avatar.jpg"
-///     }
-///     Error(_) -> // No file uploaded
-///   }
-/// }
-/// ```
-///
+//// File upload handling.
+////
+//// Provides helpers for processing multipart file uploads from
+//// Wisp's form data.
+////
+//// ## Usage
+////
+//// ```gleam
+//// import refrakt/upload
+////
+//// pub fn create(req: Request, ctx: Context) -> Response {
+////   use form_data <- wisp.require_form(req)
+////
+////   case upload.get_file(form_data, "avatar") {
+////     Ok(file) -> {
+////       // Save to disk
+////       let assert Ok(path) = upload.save(file, to: "priv/uploads")
+////       // path is like "priv/uploads/abc123_avatar.jpg"
+////     }
+////     Error(_) -> // No file uploaded
+////   }
+//// }
+//// ```
+////
+
 import gleam/bit_array
 import gleam/crypto
 import gleam/list
