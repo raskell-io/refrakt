@@ -850,21 +850,29 @@ fn resource_views(
     False -> ""
   }
 
-  // textarea is only used by `text` fields; importing it otherwise
-  // would leave an unused-import warning in the generated module.
-  let textarea_import = case list.any(fields, fn(f) { f.1 == "text" }) {
-    True -> " textarea,"
-    False -> ""
+  // Import only what the field elements use: an unused import would be
+  // a warning in the generated module. `text` fields render a textarea,
+  // every other type an input; only int, float and string-like inputs
+  // set a value.
+  let uses = fn(predicate: fn(String) -> Bool) {
+    list.any(fields, fn(f) { predicate(f.1) })
   }
+  let attribute_imports =
+    ["class", "href", "name", "type_"]
+    |> append_if(uses(fn(t) { t != "text" && t != "bool" }), "value")
+  let html_imports =
+    ["a", "button", "div", "form", "h1"]
+    |> append_if(uses(fn(t) { t != "text" }), "input")
+    |> list.append(["label", "li", "p", "section"])
+    |> append_if(uses(fn(t) { t == "text" }), "textarea")
+    |> list.append(["ul"])
 
   "import gleam/int" <> float_import <> "
 import gleam/list
 import gleam/option
-import lustre/attribute.{class, href, name, type_, value}
+import lustre/attribute.{" <> string.join(attribute_imports, ", ") <> "}
 import lustre/element.{type Element, text}
-import lustre/element/html.{
-  a, button, div, form, h1, input, label, li, p, section," <> textarea_import <> " ul,
-}
+import lustre/element/html.{" <> string.join(html_imports, ", ") <> "}
 import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
 
@@ -898,6 +906,17 @@ pub fn show_view(item: " <> type_name <> ") -> Element(Nil) {
         ],
         [text(\"Edit\")],
       ),
+      // wisp.method_override reads the method from the _method query
+      // parameter of a POST, so this form sends a DELETE.
+      form(
+        [
+          attribute.action(
+            \"/" <> resource_plural <> "/\" <> int.to_string(item.id) <> \"?_method=DELETE\",
+          ),
+          attribute.method(\"post\"),
+        ],
+        [button([type_(\"submit\"), class(\"btn\")], [text(\"Delete\")])],
+      ),
     ]),
   ])
 }
@@ -906,8 +925,10 @@ pub fn form_view(
   values: " <> resource_singular <> "_form." <> type_name <> "Form,
   errors: List(#(String, String)),
 ) -> Element(Nil) {
+  // Updates are sent as POST /<id>?_method=PUT: wisp.method_override
+  // reads the method from the _method query parameter.
   let post_action = case values.id {
-    option.Some(id) -> \"/" <> resource_plural <> "/\" <> int.to_string(id)
+    option.Some(id) -> \"/" <> resource_plural <> "/\" <> int.to_string(id) <> \"?_method=PUT\"
     option.None -> \"/" <> resource_plural <> "\"
   }
 
@@ -917,10 +938,6 @@ pub fn form_view(
       option.None -> \"New " <> type_name <> "\"
     })]),
     form([attribute.action(post_action), attribute.method(\"post\")], [
-      case values.id {
-        option.Some(_) -> input([type_(\"hidden\"), name(\"_method\"), value(\"put\")])
-        option.None -> text(\"\")
-      },
 " <> form_field_elements <> "
       button([type_(\"submit\"), class(\"btn\")], [text(\"Save\")]),
     ]),
@@ -2550,5 +2567,16 @@ fn ensure_dir_for(path: String) {
       let _ = simplifile.create_directory_all(dir)
       Nil
     }
+  }
+}
+
+fn append_if(
+  items: List(String),
+  condition: Bool,
+  item: String,
+) -> List(String) {
+  case condition {
+    True -> list.append(items, [item])
+    False -> items
   }
 }

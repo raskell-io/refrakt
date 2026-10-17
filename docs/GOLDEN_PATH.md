@@ -509,14 +509,10 @@ pub fn form_view(
   values: post_form.PostForm,
   errors: List(#(String, String)),
 ) -> Element(Nil) {
+  // wisp.method_override reads _method from the query string of a POST
   let post_action = case values.id {
-    Some(id) -> "/posts/" <> int.to_string(id)
+    Some(id) -> "/posts/" <> int.to_string(id) <> "?_method=PUT"
     None -> "/posts"
-  }
-
-  let post_method = case values.id {
-    Some(_) -> "put"
-    None -> "post"
   }
 
   section([class("post-form")], [
@@ -525,10 +521,6 @@ pub fn form_view(
       None -> "New Post"
     })]),
     form([action(post_action), method("post")], [
-      case post_method {
-        "put" -> input([type_("hidden"), name("_method"), value("put")])
-        _ -> text("")
-      },
       div([class("field")], [
         label([], [text("Title")]),
         input([type_("text"), name("title"), value(values.title)]),

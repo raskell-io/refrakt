@@ -189,6 +189,14 @@ pub fn gen_resource_creates_all_files_test() {
     )
     |> should.be_true
 
+    // wisp.method_override only reads the _method query parameter
+    file_contains("src/res_app/web/post_views.gleam", "?_method=PUT")
+    |> should.be_true
+    file_contains("src/res_app/web/post_views.gleam", "?_method=DELETE")
+    |> should.be_true
+    file_contains("src/res_app/web/post_views.gleam", "name(\"_method\")")
+    |> should.be_false
+
     let assert Ok(_) = set_cwd(cwd)
     Nil
   })
@@ -229,6 +237,11 @@ pub fn gen_resource_imports_textarea_only_for_text_fields_test() {
     |> should.be_false
     file_contains("src/ta_app/web/note_views.gleam", "textarea")
     |> should.be_true
+    // a resource with only text fields renders no input and sets no value
+    file_contains("src/ta_app/web/note_views.gleam", "input")
+    |> should.be_false
+    file_contains("src/ta_app/web/note_views.gleam", "value(")
+    |> should.be_false
 
     let assert Ok(_) = set_cwd(cwd)
     Nil
