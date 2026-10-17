@@ -9,8 +9,10 @@
 #      about`, and `gen auth` when the app has a database, all run through
 #      the app's own dev-dependency
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`
-#   5. with a database: `refrakt_cli migrate`, boot the app and smoke-test
-#      /posts, the /api/memos JSON API and the register/login flow with curl
+#   5. with a database: `refrakt_cli migrate` (including a hand-written
+#      multi-statement migration and a failing one that must roll back),
+#      boot the app and smoke-test /posts, the /api/memos JSON API and the
+#      register/login flow with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -80,6 +82,120 @@ deps_download() { gleam_hex deps download; }
 
 cli() { gleam_hex run --no-print-progress -m refrakt_cli -- "$@"; }
 
+# -----------------------------------------------------------------------------
+# Migration checks (#17): multi-statement files and one transaction per
+# migration. Both functions run inside the app directory.
+#
+# add_multi_statement_migration writes a hand-written migration with several
+# statements, including semicolons inside a string literal and a comment, and
+# on Postgres a DO $$ ... $$ block and a dollar-quoted function body. The
+# regular "Running migrations" step must apply it.
+#
+# check_migration_atomicity then adds a migration that creates a table,
+# inserts a row and fails on its last statement, and checks that
+# `refrakt migrate` reports the file and the database error. It rewrites
+# the same file into a working one that creates the same table again and
+# asserts, through CHECK constraints (no database client needed), that the
+# failed run left no rows and that the multi-statement migration ran in
+# full. The rewritten file applies only if the failed run was rolled back
+# and never recorded in _migrations. A last migrate must apply nothing.
+# -----------------------------------------------------------------------------
+
+new_migration_file() {
+  cli gen migration "$1" > /dev/null
+  ls src/app/data/migrations/*_"$1".sql
+}
+
+add_multi_statement_migration() {
+  local file
+  file="$(new_migration_file create_tags)"
+  if [ "$db" = postgres ]; then
+    cat > "$file" << 'SQL'
+-- Several statements in one file (refrakt#17)
+CREATE TABLE tags (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL
+);
+CREATE INDEX tags_name_index ON tags (name);
+/* A comment; with a semicolon */
+INSERT INTO tags (name) VALUES ('semi;colon'), ('it''s; quoted');
+DO $$
+BEGIN
+  INSERT INTO tags (name) VALUES ('from a DO; block');
+END
+$$;
+CREATE FUNCTION tag_count() RETURNS bigint AS $body$
+  SELECT count(*) FROM tags;
+$body$ LANGUAGE sql;
+SQL
+  else
+    cat > "$file" << 'SQL'
+-- Several statements in one file (refrakt#17)
+CREATE TABLE tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL
+);
+CREATE INDEX tags_name_index ON tags (name);
+/* A comment; with a semicolon */
+INSERT INTO tags (name) VALUES ('semi;colon'), ('it''s; quoted');
+SQL
+  fi
+  echo "Added $file"
+}
+
+check_migration_atomicity() {
+  local file name output expected_tags
+  file="$(new_migration_file add_broken_partial)"
+  name="$(basename "$file")"
+
+  cat > "$file" << 'SQL'
+CREATE TABLE broken_partial (id INTEGER PRIMARY KEY);
+INSERT INTO tags (name) VALUES ('from the failing migration');
+INSERT INTO no_such_table (id) VALUES (1);
+SQL
+  output="$(cli migrate)"
+  echo "$output"
+  echo "$output" | grep -q "Error: Migration $name failed and was rolled back" ||
+    fail "migrate did not report the failing migration $name"
+  echo "$output" | grep -q "no_such_table" ||
+    fail "migrate did not show the database error for $name"
+
+  # 2 rows from the multi-statement migration, plus 1 from the DO block
+  expected_tags=2
+  if [ "$db" = postgres ]; then expected_tags=3; fi
+  cat > "$file" << SQL
+CREATE TABLE broken_partial (id INTEGER PRIMARY KEY);
+CREATE TABLE migration_checks (
+  what TEXT NOT NULL,
+  ok INTEGER NOT NULL CHECK (ok = 1)
+);
+INSERT INTO migration_checks (what, ok)
+  SELECT 'failed run left no rows', CASE WHEN count(*) = 0 THEN 1 ELSE 0 END
+  FROM tags WHERE name = 'from the failing migration';
+INSERT INTO migration_checks (what, ok)
+  SELECT 'multi-statement rows', CASE WHEN count(*) = $expected_tags THEN 1 ELSE 0 END
+  FROM tags;
+INSERT INTO migration_checks (what, ok)
+  SELECT 'semicolon in a string', CASE WHEN count(*) = 1 THEN 1 ELSE 0 END
+  FROM tags WHERE name = 'semi;colon';
+SQL
+  if [ "$db" = postgres ]; then
+    cat >> "$file" << SQL
+INSERT INTO migration_checks (what, ok)
+  SELECT 'dollar-quoted function', CASE WHEN tag_count() = $expected_tags THEN 1 ELSE 0 END;
+SQL
+  fi
+  output="$(cli migrate)"
+  echo "$output"
+  echo "$output" | grep -q "Done. 1 migration(s) applied" ||
+    fail "rewritten $name did not apply: the failed run was not rolled back or was recorded"
+
+  output="$(cli migrate)"
+  echo "$output"
+  echo "$output" | grep -q "Done. 0 migration(s) applied" ||
+    fail "a second migrate applied migrations again"
+}
+
 rm -rf "$app_dir"
 
 step "Generating app (db: $db) in $app_dir"
@@ -124,6 +240,7 @@ if [ "$db" != none ]; then
   cli gen auth
   # gen auth adds argus to gleam.toml
   deps_download
+  add_multi_statement_migration
 fi
 cli routes
 
@@ -152,6 +269,11 @@ step "Running migrations"
 migrate_output="$(cli migrate)"
 echo "$migrate_output"
 echo "$migrate_output" | grep -q "migration(s) applied" || fail "migrate did not apply migrations"
+echo "$migrate_output" | grep -q "_create_tags.sql ✓" ||
+  fail "migrate did not apply the multi-statement migration"
+
+step "Checking that a failing migration is rolled back"
+check_migration_atomicity
 
 step "Booting the app on port $port"
 gleam_hex export erlang-shipment > /dev/null

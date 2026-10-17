@@ -238,6 +238,8 @@ refrakt migrate
 
 On first run, generates a `src/<app>/migrate.gleam` module that
 connects to the database and runs pending SQL files. Then executes it.
+Each file runs in its own transaction, together with the row that
+records it in `_migrations`; see [Database](database.md#running-migrations).
 
 Requires a database (`--db postgres` or `--db sqlite`).
 
