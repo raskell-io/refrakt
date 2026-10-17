@@ -4,8 +4,9 @@
 //// Templates use string concatenation — no macros, no interpolation engine.
 ////
 
+import gleam/option.{type Option, None, Some}
 import gleam/string
-import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
+import refrakt_cli/types.{type DbChoice, type Relation, NoDb, Postgres, Sqlite}
 
 // =============================================================================
 // Project files
@@ -960,14 +961,100 @@ pub fn resource_handler(
   type_name: String,
   _first_field: String,
   db: DbChoice,
+  relation: Option(Relation),
 ) -> String {
   let db_arg = case db {
     Sqlite -> "ctx.db_path"
     _ -> "ctx.db"
   }
-  "import gleam/int
+  let form = resource_singular <> "_form"
+  let repo = resource_singular <> "_repo"
+
+  // --belongs-to: the form offers the parents in a select, and a parent
+  // id without a row is a 422 like any other invalid field
+  let #(
+    list_imports,
+    parent_import,
+    new_fn,
+    check_decoded,
+    options_arg,
+    check_fn,
+  ) = case relation {
+    None -> #("", "", "pub fn new(_req: Request, _ctx: Context) -> Response {
+  " <> resource_singular <> "_views.form_view(" <> form <> ".empty(), [])
+  |> root_layout.wrap(\"New " <> type_name <> "\")
+  |> wisp.html_response(200)
+}", "", "", "")
+    Some(relation) -> {
+      let check = "check_" <> relation.singular
+      let options_arg =
+        ", " <> repo <> "." <> relation.singular <> "_options(" <> db_arg <> ")"
+      #(
+        "\nimport gleam/list\nimport gleam/result",
+        "\nimport " <> app_name <> "/data/" <> relation.singular <> "_repo",
+        "/// `/"
+          <> resource_plural
+          <> "/new?"
+          <> relation.field
+          <> "=<id>` preselects the "
+          <> relation.singular
+          <> ".
+pub fn new(req: Request, ctx: Context) -> Response {
+  let values = case
+    list.key_find(wisp.get_query(req), \""
+          <> relation.field
+          <> "\")
+    |> result.try(int.parse)
+  {
+    Ok("
+          <> relation.field
+          <> ") ->
+      "
+          <> form
+          <> "."
+          <> type_name
+          <> "Form(.."
+          <> form
+          <> ".empty(), "
+          <> relation.field
+          <> ": "
+          <> relation.field
+          <> ")
+    Error(_) -> "
+          <> form
+          <> ".empty()
+  }
+  "
+          <> resource_singular
+          <> "_views.form_view(values, []"
+          <> options_arg
+          <> ")
+  |> root_layout.wrap(\"New "
+          <> type_name
+          <> "\")
+  |> wisp.html_response(200)
+}",
+        "\n  |> result.try(" <> check <> "(ctx, _))",
+        options_arg,
+        "
+
+/// The " <> relation.singular <> " a " <> resource_singular <> " belongs to must exist.
+fn " <> check <> "(
+  ctx: Context,
+  params: " <> form <> "." <> type_name <> "Params,
+) -> Result(" <> form <> "." <> type_name <> "Params, List(#(String, String))) {
+  case " <> relation.singular <> "_repo.get(" <> db_arg <> ", params." <> relation.field <> ") {
+    Ok(_) -> Ok(params)
+    Error(_) -> Error([#(\"" <> relation.field <> "\", \"" <> relation.type_name <> " does not exist\")])
+  }
+}",
+      )
+    }
+  }
+
+  "import gleam/int" <> list_imports <> "
 import " <> app_name <> "/context.{type Context}
-import " <> app_name <> "/data/" <> resource_singular <> "_repo
+import " <> app_name <> "/data/" <> resource_singular <> "_repo" <> parent_import <> "
 import " <> app_name <> "/web/error_handler
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
 import " <> app_name <> "/web/layouts/root_layout
@@ -1003,20 +1090,16 @@ pub fn show(req: Request, ctx: Context, id: String) -> Response {
   }
 }
 
-pub fn new(_req: Request, _ctx: Context) -> Response {
-  " <> resource_singular <> "_views.form_view(" <> resource_singular <> "_form.empty(), [])
-  |> root_layout.wrap(\"New " <> type_name <> "\")
-  |> wisp.html_response(200)
-}
+" <> new_fn <> "
 
 pub fn create(req: Request, ctx: Context) -> Response {
   use form_data <- wisp.require_form(req)
 
-  case " <> resource_singular <> "_form.decode(form_data) {
+  case " <> resource_singular <> "_form.decode(form_data)" <> check_decoded <> " {
     Error(errors) ->
       " <> resource_singular <> "_views.form_view(
         " <> resource_singular <> "_form.from_form_data(form_data),
-        errors,
+        errors" <> options_arg <> ",
       )
       |> root_layout.wrap(\"New " <> type_name <> "\")
       |> wisp.html_response(422)
@@ -1039,7 +1122,7 @@ pub fn edit(req: Request, ctx: Context, id: String) -> Response {
       case " <> resource_singular <> "_repo.get(" <> db_arg <> ", id) {
         Error(_) -> error_handler.not_found(req)
         Ok(item) ->
-          " <> resource_singular <> "_views.form_view(" <> resource_singular <> "_form.from_" <> resource_singular <> "(item), [])
+          " <> resource_singular <> "_views.form_view(" <> resource_singular <> "_form.from_" <> resource_singular <> "(item), []" <> options_arg <> ")
           |> root_layout.wrap(\"Edit " <> type_name <> "\")
           |> wisp.html_response(200)
       }
@@ -1052,11 +1135,11 @@ pub fn update(req: Request, ctx: Context, id: String) -> Response {
   case int.parse(id) {
     Error(_) -> error_handler.not_found(req)
     Ok(id) ->
-      case " <> resource_singular <> "_form.decode(form_data) {
+      case " <> resource_singular <> "_form.decode(form_data)" <> check_decoded <> " {
         Error(errors) ->
           " <> resource_singular <> "_views.form_view(
             " <> resource_singular <> "_form.from_form_data(form_data),
-            errors,
+            errors" <> options_arg <> ",
           )
           |> root_layout.wrap(\"Edit " <> type_name <> "\")
           |> wisp.html_response(422)
@@ -1082,7 +1165,7 @@ pub fn delete(req: Request, ctx: Context, id: String) -> Response {
       |> flash.set_flash(req, \"info\", \"" <> type_name <> " deleted\")
     }
   }
-}
+}" <> check_fn <> "
 "
 }
 
@@ -1100,7 +1183,13 @@ pub fn resource_domain_type(
       "\n",
     )
 
-  "pub type " <> type_name <> " {
+  // optional(T) fields are Option(T)
+  let option_import = case string.contains(field_defs, ": Option(") {
+    True -> "import gleam/option.{type Option}\n\n"
+    False -> ""
+  }
+
+  option_import <> "pub type " <> type_name <> " {
   " <> type_name <> "(
     id: Int,
 " <> field_defs <> "

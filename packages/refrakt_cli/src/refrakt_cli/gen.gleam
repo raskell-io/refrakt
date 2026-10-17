@@ -4,11 +4,15 @@
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 import refrakt_cli/format
 import refrakt_cli/project
 import refrakt_cli/templates
-import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
+import refrakt_cli/types.{
+  type DbChoice, type Relation, NoDb, Postgres, Relation, Sqlite,
+}
 import simplifile
 
 // =============================================================================
@@ -83,18 +87,171 @@ pub fn resource(name: String, raw_args: List(String)) {
 
 fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   let app = project.app_name()
-  let api_mode = list.contains(raw_args, "--api")
-  let belongs_to = extract_flag_value(raw_args, "--belongs-to")
-  let raw_fields = list.filter(raw_args, fn(a) { !string.starts_with(a, "--") })
+  let parsed = {
+    use #(raw_fields, api_mode, belongs_to) <- result.try(resource_args(
+      raw_args,
+      [],
+      False,
+      None,
+    ))
+    use fields <- result.try(parse_fields(raw_fields))
+    use relation <- result.try(load_relation(app, belongs_to))
+    use fields <- result.try(add_relation_field(fields, relation))
+    Ok(#(fields, api_mode, relation))
+  }
+  case parsed {
+    Error(message) -> {
+      io.println("Error: " <> message)
+      io.println("Nothing was generated.")
+    }
+    Ok(#(fields, api_mode, relation)) ->
+      generate_resource(app, name, fields, api_mode, relation, db)
+  }
+}
+
+/// Split `gen resource` arguments into field specs, `--api` and the
+/// `--belongs-to` parent.
+fn resource_args(
+  args: List(String),
+  fields: List(String),
+  api_mode: Bool,
+  belongs_to: Option(String),
+) -> Result(#(List(String), Bool, Option(String)), String) {
+  case args {
+    [] -> Ok(#(list.reverse(fields), api_mode, belongs_to))
+    ["--api", ..rest] -> resource_args(rest, fields, True, belongs_to)
+    ["--belongs-to=" <> parent, ..rest] | ["--belongs-to", parent, ..rest] ->
+      case parent == "" || string.starts_with(parent, "-") {
+        True -> Error(belongs_to_usage)
+        False -> resource_args(rest, fields, api_mode, Some(parent))
+      }
+    ["--belongs-to"] -> Error(belongs_to_usage)
+    [arg, ..rest] ->
+      case string.starts_with(arg, "-") {
+        True ->
+          Error("Unknown option " <> arg <> " (use --api or --belongs-to).")
+        False -> resource_args(rest, [arg, ..fields], api_mode, belongs_to)
+      }
+  }
+}
+
+const belongs_to_usage =
+  "--belongs-to needs the parent resource, such as --belongs-to posts."
+
+/// Look up the parent resource of `--belongs-to`. It must have been
+/// generated (a domain type and a repo with `get`), since the child's
+/// handlers check that the parent exists.
+fn load_relation(
+  app: String,
+  belongs_to: Option(String),
+) -> Result(Option(Relation), String) {
+  case belongs_to {
+    None -> Ok(None)
+    Some(plural) -> {
+      let singular = singularize(plural)
+      let domain_path = "src/" <> app <> "/domain/" <> singular <> ".gleam"
+      let repo_path = "src/" <> app <> "/data/" <> singular <> "_repo.gleam"
+      case simplifile.read(domain_path), simplifile.read(repo_path) {
+        Ok(domain), Ok(repo) ->
+          case string.contains(repo, "pub fn get(") {
+            False ->
+              Error(
+                "--belongs-to "
+                <> plural
+                <> ": "
+                <> repo_path
+                <> " has no `get(db, id)` function, which the generated handlers use to check that the "
+                <> singular
+                <> " exists.",
+              )
+            True ->
+              Ok(
+                Some(Relation(
+                  plural: plural,
+                  singular: singular,
+                  type_name: capitalize(singular),
+                  table: singular <> "s",
+                  field: singular <> "_id",
+                  label: first_string_field(domain),
+                )),
+              )
+          }
+        _, _ ->
+          Error(
+            "--belongs-to "
+            <> plural
+            <> ": there is no "
+            <> plural
+            <> " resource ("
+            <> domain_path
+            <> " or "
+            <> repo_path
+            <> " is missing). Generate it first, for example: refrakt gen resource "
+            <> plural
+            <> " title:string",
+          )
+      }
+    }
+  }
+}
+
+/// The first `name: String` field of a generated domain type, such as
+/// `pub type Post { Post(id: Int, title: String) }` on one line or several.
+pub fn first_string_field(domain: String) -> Option(String) {
+  let fields = case string.split_once(domain, "(") {
+    Ok(#(_, after)) -> after
+    Error(_) -> ""
+  }
+  fields
+  |> string.split(",")
+  |> list.find_map(fn(field) {
+    case string.split_once(field, ":") {
+      Ok(#(name, gleam_type)) ->
+        // the last field is followed by the constructor's `)`
+        case string.trim(name), string.trim(gleam_type) {
+          "id", _ -> Error(Nil)
+          name, "String" -> Ok(name)
+          name, "String)" <> _ -> Ok(name)
+          _, _ -> Error(Nil)
+        }
+      Error(_) -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+/// Append the foreign key field of `--belongs-to`.
+fn add_relation_field(
+  fields: List(#(String, String)),
+  relation: Option(Relation),
+) -> Result(List(#(String, String)), String) {
+  case relation {
+    None -> Ok(fields)
+    Some(relation) ->
+      case list.any(fields, fn(f) { f.0 == relation.field }) {
+        True ->
+          Error(
+            "--belongs-to "
+            <> relation.plural
+            <> " adds the field "
+            <> relation.field
+            <> " itself; leave it out of the field list.",
+          )
+        False -> Ok(list.append(fields, [#(relation.field, "int")]))
+      }
+  }
+}
+
+fn generate_resource(
+  app: String,
+  name: String,
+  fields: List(#(String, String)),
+  api_mode: Bool,
+  relation: Option(Relation),
+  db: DbChoice,
+) {
   let singular = singularize(name)
   let type_name = capitalize(singular)
-
-  // Add foreign key field if --belongs-to is set
-  let extra_fields = case belongs_to {
-    Ok(parent) -> [#(singularize(parent) <> "_id", "int")]
-    Error(_) -> []
-  }
-  let fields = list.append(parse_fields(raw_fields), extra_fields)
 
   // Paths
   let handler_path = "src/" <> app <> "/web/" <> singular <> "_handler.gleam"
@@ -143,7 +300,15 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
     True ->
       simplifile.write(
         handler_path,
-        api_resource_handler(app, name, singular, type_name, db, fields),
+        api_resource_handler(
+          app,
+          name,
+          singular,
+          type_name,
+          db,
+          fields,
+          relation,
+        ),
       )
     False ->
       simplifile.write(
@@ -155,6 +320,7 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
           type_name,
           first_field,
           db,
+          relation,
         ),
       )
   }
@@ -165,7 +331,7 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
       let assert Ok(_) =
         simplifile.write(
           views_path,
-          resource_views(app, name, singular, type_name, fields),
+          resource_views(app, name, singular, type_name, fields, relation),
         )
       let assert Ok(_) =
         simplifile.write(
@@ -191,17 +357,62 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   let assert Ok(_) =
     simplifile.write(
       repo_path,
-      resource_repo(app, singular, type_name, fields, db),
+      resource_repo(app, singular, type_name, fields, db, relation, !api_mode),
     )
 
   let assert Ok(_) =
-    simplifile.write(migration_path, resource_migration(name, fields, db))
+    simplifile.write(
+      migration_path,
+      resource_migration(name, fields, db, relation),
+    )
 
+  // The DB-backed tests of a --belongs-to resource create a parent first
+  let parent = case relation {
+    Some(relation) -> parent_fixture(app, relation, db)
+    None -> None
+  }
   let assert Ok(_) =
     simplifile.write(test_path, case api_mode {
-      True -> api_resource_test(app, name, singular, db, fields)
-      False -> resource_test(app, name, singular, fields, db)
+      True -> api_resource_test(app, name, singular, db, fields, parent)
+      // A --belongs-to form re-renders with the parents from the database,
+      // which the tests that do not use test_db do not start on Postgres
+      False ->
+        resource_test(
+          app,
+          name,
+          singular,
+          fields,
+          db,
+          case relation, db {
+            Some(_), Postgres -> False
+            _, _ -> True
+          },
+          parent,
+        )
     })
+
+  // An HTML child gets a component listing it on the parent's show page
+  let children = case relation, api_mode {
+    Some(relation), False ->
+      Some(generate_children(
+        app,
+        name,
+        singular,
+        type_name,
+        fields,
+        relation,
+        db,
+      ))
+    _, _ -> None
+  }
+  let created_paths = case children {
+    Some(children) -> list.append(created_paths, [children.component_path])
+    None -> created_paths
+  }
+  let patched_paths = case children {
+    Some(Children(patched: Some(path), ..)) -> [path]
+    _ -> []
+  }
 
   // The generated tests run against a real database
   let test_db_paths = case ensure_test_db(app, db) {
@@ -215,7 +426,9 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
     False -> patch_router_resource(app, name, singular)
   }
   let router_path = "src/" <> app <> "/router.gleam"
-  format.format_files([router_path, ..list.append(created_paths, test_db_paths)])
+  format.format_files(
+    list.flatten([[router_path], created_paths, patched_paths, test_db_paths]),
+  )
 
   io.println("")
   io.println("Created:")
@@ -231,10 +444,90 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   io.println("  " <> repo_path)
   io.println("  " <> migration_path)
   io.println("  " <> test_path)
+  case children {
+    Some(children) -> io.println("  " <> children.component_path)
+    None -> Nil
+  }
   list.each(test_db_paths, fn(path) { io.println("  " <> path) })
   io.println("")
   io.println("Updated:")
   io.println("  " <> router_path)
+  list.each(patched_paths, fn(path) {
+    io.println("  " <> path <> " (lists the " <> name <> " on the show page)")
+  })
+  case children {
+    Some(Children(instructions: [_, ..] as lines, ..)) -> {
+      io.println("")
+      list.each(lines, io.println)
+    }
+    _ -> Nil
+  }
+  case relation {
+    Some(relation) -> print_relation_notes(app, name, relation, db)
+    None -> Nil
+  }
+}
+
+/// A field whose Gleam type is `String`: string, text, date or datetime.
+fn is_plain_string(field_type: String) -> Bool {
+  case field_type {
+    "string" | "text" | "date" | "datetime" -> True
+    _ -> False
+  }
+}
+
+/// Notes for a `--belongs-to` resource that depend on the database.
+fn print_relation_notes(
+  app: String,
+  name: String,
+  relation: Relation,
+  db: DbChoice,
+) {
+  io.println("")
+  io.println(
+    "Each of the "
+    <> name
+    <> " belongs to a "
+    <> relation.singular
+    <> " ("
+    <> relation.field
+    <> " REFERENCES "
+    <> relation.table
+    <> "(id) ON DELETE CASCADE): deleting a "
+    <> relation.singular
+    <> " deletes its "
+    <> name
+    <> ".",
+  )
+  case db {
+    Sqlite -> {
+      // SQLite enforces foreign keys only on connections that ask for it.
+      // Repos generated since 0.6 turn them on in `delete`.
+      let parent_repo =
+        "src/" <> app <> "/data/" <> relation.singular <> "_repo.gleam"
+      case simplifile.read(parent_repo) {
+        Ok(content) ->
+          case string.contains(content, "PRAGMA foreign_keys = ON") {
+            True -> Nil
+            False -> {
+              io.println(
+                "SQLite only enforces foreign keys (and ON DELETE CASCADE) when a connection",
+              )
+              io.println(
+                "turns them on. Add this line to `delete` in "
+                <> parent_repo
+                <> ", after `use conn <- sqlight.with_connection(db_path)`:",
+              )
+              io.println(
+                "  use _ <- result.try(sqlight.exec(\"PRAGMA foreign_keys = ON\", conn) |> result.replace_error(Nil))",
+              )
+            }
+          }
+        Error(_) -> Nil
+      }
+    }
+    _ -> Nil
+  }
 }
 
 // =============================================================================
@@ -694,6 +987,16 @@ pub fn script_tag() -> Element(Nil) {
 
 /// The `gleam/dynamic/decode` decoder for one field of a JSON body.
 fn api_field_decoder(field_type: String) -> String {
+  case is_optional(field_type) {
+    True ->
+      "decode.optional("
+      <> plain_api_field_decoder(base_type(field_type))
+      <> ")"
+    False -> plain_api_field_decoder(field_type)
+  }
+}
+
+fn plain_api_field_decoder(field_type: String) -> String {
   case field_type {
     "int" -> "decode.int"
     "float" -> "float_or_int()"
@@ -714,7 +1017,7 @@ fn api_field_encoder(field_type: String) -> String {
 
 /// A valid JSON value for a field, for generated tests.
 fn api_sample_json(field_type: String) -> String {
-  case field_type {
+  case base_type(field_type) {
     "int" -> "json.int(42)"
     "float" -> "json.float(3.14)"
     "bool" -> "json.bool(True)"
@@ -724,7 +1027,7 @@ fn api_sample_json(field_type: String) -> String {
 
 /// Another valid JSON value for a field, for generated update tests.
 fn api_updated_json(field_type: String) -> String {
-  case field_type {
+  case base_type(field_type) {
     "int" -> "json.int(7)"
     "float" -> "json.float(2.5)"
     "bool" -> "json.bool(False)"
@@ -734,7 +1037,7 @@ fn api_updated_json(field_type: String) -> String {
 
 /// `api_updated_json` as it appears in a JSON response.
 fn api_updated_json_text(field_type: String) -> String {
-  case field_type {
+  case base_type(field_type) {
     "int" -> "7"
     "float" -> "2.5"
     "bool" -> "false"
@@ -744,7 +1047,7 @@ fn api_updated_json_text(field_type: String) -> String {
 
 /// A JSON value of the wrong type for a field, for generated tests.
 fn api_wrong_json(field_type: String) -> String {
-  case field_type {
+  case base_type(field_type) {
     "int" | "float" -> "json.string(\"not a number\")"
     "bool" -> "json.string(\"not a bool\")"
     _ -> "json.int(42)"
@@ -764,11 +1067,13 @@ fn api_params_module(
 ) -> String {
   let params = type_name <> "Params"
   let required = api_required_fields(fields)
-  let has_float = list.any(fields, fn(f) { f.1 == "float" })
+  let has_float = list.any(fields, fn(f) { base_type(f.1) == "float" })
+  let has_optional = list.any(fields, fn(f) { is_optional(f.1) })
 
   let imports =
     ["import gleam/dynamic.{type Dynamic}", "import gleam/dynamic/decode"]
     |> append_if(has_float, "import gleam/int")
+    |> append_if(has_optional, "import gleam/option.{type Option, None}")
     |> append_if(required != [], "import refrakt/validate")
     |> string.join("\n")
 
@@ -877,7 +1182,8 @@ pub fn decode_json(data: Dynamic) -> Result(" <> params <> ", JsonError) {
 
 /// The JSON shape of " <> params <> ". A missing field gets the value an
 /// empty HTML form field would (`\"\"`, `0`, `0.0`, `false`); `null` or a
-/// value of the wrong type fails decoding.
+/// value of the wrong type fails decoding. An optional field may be
+/// missing or `null`, and is then `None`.
 pub fn decoder() -> decode.Decoder(" <> params <> ") {
 " <> decoder_lines <> "
   decode.success(" <> params <> "(" <> constructor_args <> "))
@@ -894,6 +1200,7 @@ fn api_resource_handler(
   type_name: String,
   db: DbChoice,
   fields: List(#(String, String)),
+  relation: Option(Relation),
 ) -> String {
   let db_arg = case db {
     Sqlite -> "ctx.db_path"
@@ -906,15 +1213,59 @@ fn api_resource_handler(
     fields
     |> list.map(fn(f) {
       let #(name, field_type) = f
-      "    #(\""
-      <> name
-      <> "\", "
-      <> api_field_encoder(field_type)
-      <> "(item."
-      <> name
-      <> ")),"
+      let value = case is_optional(field_type) {
+        // None is encoded as null
+        True ->
+          "json.nullable(item."
+          <> name
+          <> ", "
+          <> api_field_encoder(base_type(field_type))
+          <> ")"
+        False -> api_field_encoder(field_type) <> "(item." <> name <> ")"
+      }
+      "    #(\"" <> name <> "\", " <> value <> "),"
     })
     |> string.join("\n")
+
+  let update_call =
+    "case " <> repo <> ".update(" <> db_arg <> ", item.id, params) {
+            Ok(item) -> json_response(to_json(item), 200)
+            Error(_) -> internal_error()
+          }"
+
+  // --belongs-to: a body whose parent id has no row is a 422
+  let #(check_create, update_record, parent_import, check_fn) = case relation {
+    None -> #("", "\n          " <> update_call, "", "")
+    Some(relation) -> {
+      let check = "check_" <> relation.singular
+      #("\n    |> result.try(" <> check <> "(ctx, _))", "
+          case " <> check <> "(ctx, params) {
+            Error(error) -> invalid_body(error)
+            Ok(params) ->
+              " <> update_call <> "
+          }", "\nimport "
+        <> app_name
+        <> "/data/"
+        <> relation.singular
+        <> "_repo", "
+
+/// The " <> relation.singular <> " a " <> resource_singular <> " belongs to must exist.
+fn " <> check <> "(
+  ctx: Context,
+  params: " <> form <> "." <> type_name <> "Params,
+) -> Result(" <> form <> "." <> type_name <> "Params, " <> form <> ".JsonError) {
+  case " <> relation.singular <> "_repo.get(" <> db_arg <> ", params." <> relation.field <> ") {
+    Ok(_) -> Ok(params)
+    Error(_) ->
+      Error(
+        " <> form <> ".InvalidParams([
+          #(\"" <> relation.field <> "\", \"" <> relation.type_name <> " does not exist\"),
+        ]),
+      )
+  }
+}")
+    }
+  }
 
   "//// JSON API for "
   <> resource_plural
@@ -947,6 +1298,7 @@ import "
   <> app_name
   <> "/data/"
   <> repo
+  <> parent_import
   <> "
 import "
   <> app_name
@@ -999,7 +1351,9 @@ pub fn create(req: Request, ctx: Context) -> Response {
 
   case "
   <> form
-  <> ".decode_json(body) {
+  <> ".decode_json(body)"
+  <> check_create
+  <> " {
     Error(error) -> invalid_body(error)
     Ok(params) ->
       case "
@@ -1032,15 +1386,9 @@ pub fn update(req: Request, ctx: Context, id: String) -> Response {
     Ok(params) ->
       case find(ctx, id) {
         Error(_) -> not_found()
-        Ok(item) ->
-          case "
-  <> repo
-  <> ".update("
-  <> db_arg
-  <> ", item.id, params) {
-            Ok(item) -> json_response(to_json(item), 200)
-            Error(_) -> internal_error()
-          }
+        Ok(item) ->"
+  <> update_record
+  <> "
       }
   }
 }
@@ -1134,6 +1482,258 @@ fn not_found() -> Response {
 fn internal_error() -> Response {
   json.object([#(\"error\", json.string(\"internal server error\"))])
   |> json_response(500)
+}"
+  <> check_fn
+  <> "
+"
+}
+
+// --belongs-to: children on the parent's show page ---------------------------
+
+/// What `generate_children` wrote: the component, and the parent handler
+/// it patched or the instructions to wire the component in by hand.
+type Children {
+  Children(
+    component_path: String,
+    patched: Option(String),
+    instructions: List(String),
+  )
+}
+
+/// Write `web/components/<child>_list.gleam` and render it on the parent's
+/// show page. The parent's handler is patched only when its `show` still
+/// renders `<parent>_views.show_view(item)` exactly once, as generated;
+/// otherwise the CLI prints what to add.
+fn generate_children(
+  app: String,
+  plural: String,
+  singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+  db: DbChoice,
+) -> Children {
+  let component_path =
+    "src/" <> app <> "/web/components/" <> singular <> "_list.gleam"
+  ensure_dir_for(component_path)
+  let assert Ok(_) =
+    simplifile.write(
+      component_path,
+      children_component(app, plural, singular, type_name, fields, relation),
+    )
+
+  let db_arg = case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
+  let render_call =
+    singular
+    <> "_list.render(item.id, "
+    <> singular
+    <> "_repo.list_for_"
+    <> relation.singular
+    <> "("
+    <> db_arg
+    <> ", item.id))"
+  let parent_handler =
+    "src/" <> app <> "/web/" <> relation.singular <> "_handler.gleam"
+  let show_call = relation.singular <> "_views.show_view(item)"
+  let repo_import = "import " <> app <> "/data/" <> singular <> "_repo"
+  let component_import =
+    "import " <> app <> "/web/components/" <> singular <> "_list"
+
+  let patched = {
+    use content <- result.try(
+      simplifile.read(parent_handler) |> result.replace_error(Nil),
+    )
+    use content <- result.try(patch_parent_show(content, show_call, render_call))
+    let content = case imports_lustre_element(content) {
+      True -> content
+      False -> add_import(content, "import lustre/element")
+    }
+    let content =
+      content
+      |> add_import(repo_import)
+      |> add_import(component_import)
+    simplifile.write(parent_handler, content) |> result.replace_error(Nil)
+  }
+
+  case patched {
+    Ok(_) -> Children(component_path, Some(parent_handler), [])
+    Error(_) ->
+      Children(component_path, None, [
+        "To list the "
+          <> plural
+          <> " on a "
+          <> relation.singular
+          <> "'s page, render the component in `show` of "
+          <> parent_handler
+          <> ":",
+        "",
+        "  import lustre/element",
+        "  " <> repo_import,
+        "  " <> component_import,
+        "",
+        "  element.fragment([",
+        "    " <> show_call <> ",",
+        "    " <> render_call <> ",",
+        "  ])",
+      ])
+  }
+}
+
+/// Render `render_call` after the parent's show view: wrap the generated
+/// `show_view(item)` in an `element.fragment`, or add to the fragment an
+/// earlier `--belongs-to` child made.
+fn patch_parent_show(
+  content: String,
+  show_call: String,
+  render_call: String,
+) -> Result(String, Nil) {
+  case string.contains(content, render_call) {
+    True -> Ok(content)
+    False ->
+      case string.split(content, show_call <> ",\n") {
+        [before, after] ->
+          Ok(before <> show_call <> ",\n" <> render_call <> ",\n" <> after)
+        _ ->
+          case string.split(content, show_call <> "\n") {
+            [before, after] ->
+              Ok(
+                before
+                <> "element.fragment([\n"
+                <> show_call
+                <> ",\n"
+                <> render_call
+                <> ",\n])\n"
+                <> after,
+              )
+            _ -> Error(Nil)
+          }
+      }
+  }
+}
+
+/// Whether a module imports `lustre/element` itself (not only a submodule
+/// such as `lustre/element/html`).
+fn imports_lustre_element(content: String) -> Bool {
+  content
+  |> string.split("\n")
+  |> list.any(fn(line) {
+    line == "import lustre/element"
+    || string.starts_with(line, "import lustre/element.{")
+    || string.starts_with(line, "import lustre/element as ")
+  })
+}
+
+fn children_component(
+  app: String,
+  plural: String,
+  singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+) -> String {
+  let label = case list.find(fields, fn(f) { is_plain_string(f.1) }) {
+    Ok(#(name, _)) -> "item." <> name
+    Error(_) -> "\"" <> type_name <> " #\" <> int.to_string(item.id)"
+  }
+  let parent_id = relation.field
+
+  "//// The "
+  <> plural
+  <> " of a "
+  <> relation.singular
+  <> ", for the "
+  <> relation.singular
+  <> "'s show page.
+////
+//// `gen resource "
+  <> plural
+  <> " --belongs-to "
+  <> relation.plural
+  <> "` renders it in `show` of
+//// web/"
+  <> relation.singular
+  <> "_handler.gleam, after the "
+  <> relation.singular
+  <> ":
+////
+////     "
+  <> singular
+  <> "_list.render(item.id, "
+  <> singular
+  <> "_repo.list_for_"
+  <> relation.singular
+  <> "(db, item.id))
+
+import gleam/int
+import gleam/list
+import "
+  <> app
+  <> "/domain/"
+  <> singular
+  <> ".{type "
+  <> type_name
+  <> "}
+import lustre/attribute.{class, href}
+import lustre/element.{type Element, text}
+import lustre/element/html.{a, h2, li, p, section, ul}
+
+pub fn render("
+  <> parent_id
+  <> ": Int, items: List("
+  <> type_name
+  <> ")) -> Element(Nil) {
+  section([class(\""
+  <> plural
+  <> "\")], [
+    h2([], [text(\""
+  <> capitalize(plural)
+  <> "\")]),
+    case items {
+      [] -> p([], [text(\"No "
+  <> plural
+  <> " yet.\")])
+      _ ->
+        ul(
+          [],
+          list.map(items, fn(item) {
+            li([], [
+              a([href(\"/"
+  <> plural
+  <> "/\" <> int.to_string(item.id))], [
+                text("
+  <> label
+  <> "),
+              ]),
+            ])
+          }),
+        )
+    },
+    // /"
+  <> plural
+  <> "/new?"
+  <> parent_id
+  <> "=<id> preselects the "
+  <> relation.singular
+  <> " in the form
+    a(
+      [
+        href(\"/"
+  <> plural
+  <> "/new?"
+  <> parent_id
+  <> "=\" <> int.to_string("
+  <> parent_id
+  <> ")),
+        class(\"btn\"),
+      ],
+      [text(\"New "
+  <> type_name
+  <> "\")],
+    ),
+  ])
 }
 "
 }
@@ -1144,69 +1744,96 @@ fn resource_views(
   resource_singular: String,
   type_name: String,
   fields: List(#(String, String)),
+  relation: Option(Relation),
 ) -> String {
-  let first_field = case fields {
-    [#(name, _), ..] -> name
-    [] -> "id"
+  let is_relation = fn(field_name: String) {
+    case relation {
+      Some(relation) -> relation.field == field_name
+      None -> False
+    }
   }
 
   let form_field_elements =
     fields
     |> list.map(fn(f) {
-      let #(fname, ftype) = f
-      let label_text = capitalize(fname)
-      case ftype {
-        "bool" -> "      div([class(\"field\")], [
-        label([], [
-          input([type_(\"checkbox\"), name(\"" <> fname <> "\"), attribute.checked(values." <> fname <> ")]),
-          text(\" " <> label_text <> "\"),
-        ]),
-      ]),"
-        "text" -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        textarea([name(\"" <> fname <> "\")], values." <> fname <> "),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
-        "int" -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        input([type_(\"number\"), name(\"" <> fname <> "\"), value(int.to_string(values." <> fname <> "))]),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
-        "float" -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        input([type_(\"number\"), name(\"" <> fname <> "\"), value(float.to_string(values." <> fname <> "))]),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
-        _ -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        input([type_(\"text\"), name(\"" <> fname <> "\"), value(values." <> fname <> ")]),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
+      case relation {
+        Some(relation) if relation.field == f.0 -> relation_select(relation)
+        _ -> form_field_element(f)
       }
     })
     |> string.join("\n")
 
-  let float_import = case list.any(fields, fn(f) { f.1 == "float" }) {
+  let show_field_elements =
+    fields
+    |> list.map(fn(f) {
+      let #(fname, _) = f
+      let #(label_text, value) = case relation {
+        Some(relation) if relation.field == fname -> #(
+          relation.type_name,
+          "a([href(\"/"
+            <> relation.plural
+            <> "/\" <> int.to_string(item."
+            <> fname
+            <> "))], [text(\""
+            <> relation.type_name
+            <> " #\" <> int.to_string(item."
+            <> fname
+            <> "))])",
+        )
+        _ -> #(capitalize(fname), "text(" <> show_value(f) <> ")")
+      }
+      "      dt([], [text(\"" <> label_text <> "\")]),
+      dd([], [" <> value <> "]),"
+    })
+    |> string.join("\n")
+
+  let float_import = case
+    list.any(fields, fn(f) { base_type(f.1) == "float" })
+  {
     True -> "\nimport gleam/float"
     False -> ""
   }
 
   // Import only what the field elements use: an unused import would be
   // a warning in the generated module. `text` fields render a textarea,
-  // every other type an input; only int, float and string-like inputs
-  // set a value.
-  let uses = fn(predicate: fn(String) -> Bool) {
-    list.any(fields, fn(f) { predicate(f.1) })
+  // optional bools and the --belongs-to field a select, every other type
+  // an input; all but text fields and checkboxes set a value.
+  let uses = fn(predicate: fn(#(String, String)) -> Bool) {
+    list.any(fields, predicate)
+  }
+  let renders_input = fn(f: #(String, String)) {
+    let #(fname, ftype) = f
+    base_type(ftype) != "text"
+    && ftype != "optional(bool)"
+    && !is_relation(fname)
   }
   let attribute_imports =
-    ["class", "href", "name", "rel", "type_"]
-    |> append_if(uses(fn(t) { t != "text" && t != "bool" }), "value")
+    ["class", "href", "name", "rel"]
+    |> append_if(uses(fn(f) { base_type(f.1) == "float" }), "step")
+    |> list.append(["type_"])
+    |> append_if(
+      uses(fn(f) { base_type(f.1) != "text" && f.1 != "bool" }),
+      "value",
+    )
   let html_imports =
-    ["a", "button", "div", "form", "h1"]
-    |> append_if(uses(fn(t) { t != "text" }), "input")
+    ["a", "button", "dd", "div", "dl", "dt", "form", "h1"]
+    |> append_if(uses(renders_input), "input")
     |> list.append(["label", "li", "nav", "p", "section", "span"])
-    |> append_if(uses(fn(t) { t == "text" }), "textarea")
+    |> append_if(uses(fn(f) { base_type(f.1) == "text" }), "textarea")
     |> list.append(["ul"])
+
+  let options_param = case relation {
+    Some(relation) ->
+      "\n  " <> relation.singular <> "_options: List(#(Int, String)),"
+    None -> ""
+  }
+
+  // index_view and show_view label a record with its first required
+  // string field, or with its id
+  let show_title = case list.find(fields, fn(f) { is_plain_string(f.1) }) {
+    Ok(#(name, _)) -> "item." <> name
+    Error(_) -> "\"" <> type_name <> " #\" <> int.to_string(item.id)"
+  }
 
   "import gleam/int" <> float_import <> "
 import gleam/list
@@ -1229,7 +1856,7 @@ pub fn index_view(page: paginate.Page(" <> type_name <> ")) -> Element(Nil) {
       list.map(page.items, fn(item) {
         li([], [
           a([href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id))], [
-            text(item." <> first_field <> "),
+            text(" <> show_title <> "),
           ]),
         ])
       }),
@@ -1273,7 +1900,11 @@ fn pagination(page: paginate.Page(item)) -> Element(Nil) {
 
 pub fn show_view(item: " <> type_name <> ") -> Element(Nil) {
   section([class(\"" <> resource_singular <> "\")], [
-    h1([], [text(item." <> first_field <> ")]),
+    h1([], [text(" <> show_title <> ")]),
+    // Fields without a value (None) show as an em dash
+    dl([], [
+" <> show_field_elements <> "
+    ]),
     div([class(\"actions\")], [
       a(
         [
@@ -1299,7 +1930,7 @@ pub fn show_view(item: " <> type_name <> ") -> Element(Nil) {
 
 pub fn form_view(
   values: " <> resource_singular <> "_form." <> type_name <> "Form,
-  errors: List(#(String, String)),
+  errors: List(#(String, String))," <> options_param <> "
 ) -> Element(Nil) {
   // Updates are sent as POST /<id>?_method=PUT: wisp.method_override
   // reads the method from the _method query parameter.
@@ -1330,6 +1961,126 @@ fn field_error(
   }
 }
 "
+}
+
+/// The form element for one field. An optional field renders `None` as
+/// an empty value; an optional bool is a select (blank, Yes, No), since a
+/// checkbox cannot say "not set".
+fn form_field_element(field: #(String, String)) -> String {
+  let #(fname, ftype) = field
+  let label_text = capitalize(fname)
+  let labelled = fn(control: String) { "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        " <> control <> ",
+        field_error(errors, \"" <> fname <> "\"),
+      ])," }
+  let input = fn(input_type: String, extra: String, shown: String) {
+    "input([type_(\""
+    <> input_type
+    <> "\"), name(\""
+    <> fname
+    <> "\"), "
+    <> extra
+    <> "value("
+    <> shown
+    <> ")])"
+  }
+  let optional_value = fn(to_string: String) {
+    "values."
+    <> fname
+    <> " |> option.map("
+    <> to_string
+    <> ") |> option.unwrap(\"\")"
+  }
+  case ftype {
+    "bool" -> "      div([class(\"field\")], [
+        label([], [
+          input([type_(\"checkbox\"), name(\"" <> fname <> "\"), attribute.checked(values." <> fname <> ")]),
+          text(\" " <> label_text <> "\"),
+        ]),
+      ]),"
+    "text" ->
+      labelled("textarea([name(\"" <> fname <> "\")], values." <> fname <> ")")
+    "int" ->
+      labelled(input("number", "", "int.to_string(values." <> fname <> ")"))
+    "float" ->
+      labelled(input(
+        "number",
+        "step(\"any\"), ",
+        "float.to_string(values." <> fname <> ")",
+      ))
+    "optional(bool)" -> labelled("html.select([name(\"" <> fname <> "\")], [
+          html.option([value(\"\"), attribute.selected(values." <> fname <> " == option.None)], \"—\"),
+          html.option([value(\"true\"), attribute.selected(values." <> fname <> " == option.Some(True))], \"Yes\"),
+          html.option([value(\"false\"), attribute.selected(values." <> fname <> " == option.Some(False))], \"No\"),
+        ])")
+    "optional(text)" ->
+      labelled(
+        "textarea([name(\""
+        <> fname
+        <> "\")], option.unwrap(values."
+        <> fname
+        <> ", \"\"))",
+      )
+    "optional(int)" ->
+      labelled(input("number", "", optional_value("int.to_string")))
+    "optional(float)" ->
+      labelled(input(
+        "number",
+        "step(\"any\"), ",
+        optional_value("float.to_string"),
+      ))
+    "optional(" <> _ ->
+      labelled(input("text", "", "option.unwrap(values." <> fname <> ", \"\")"))
+    _ -> labelled(input("text", "", "values." <> fname))
+  }
+}
+
+/// The `--belongs-to` field: a select of the parents, labelled by the
+/// parent's first string field (or its id).
+fn relation_select(relation: Relation) -> String {
+  let fname = relation.field
+  "      div([class(\"field\")], [
+        label([], [text(\"" <> relation.type_name <> "\")]),
+        html.select([name(\"" <> fname <> "\")], [
+          html.option([value(\"\")], \"Choose a " <> relation.singular <> "\"),
+          ..list.map(" <> relation.singular <> "_options, fn(choice) {
+            html.option(
+              [
+                value(int.to_string(choice.0)),
+                attribute.selected(choice.0 == values." <> fname <> "),
+              ],
+              choice.1,
+            )
+          })
+        ]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
+}
+
+/// The text the show view renders for a field; `None` is an em dash.
+fn show_value(field: #(String, String)) -> String {
+  let #(fname, ftype) = field
+  let value = "item." <> fname
+  case ftype {
+    "int" -> "int.to_string(" <> value <> ")"
+    "float" -> "float.to_string(" <> value <> ")"
+    "bool" -> "case " <> value <> " {
+          True -> \"Yes\"
+          False -> \"No\"
+        }"
+    "optional(int)" ->
+      value <> " |> option.map(int.to_string) |> option.unwrap(\"—\")"
+    "optional(float)" ->
+      value <> " |> option.map(float.to_string) |> option.unwrap(\"—\")"
+    "optional(bool)" -> "case " <> value <> " {
+          option.Some(True) -> \"Yes\"
+          option.Some(False) -> \"No\"
+          option.None -> \"—\"
+        }"
+    "optional(" <> _ -> "option.unwrap(" <> value <> ", \"—\")"
+    _ -> value
+  }
 }
 
 fn resource_form(
@@ -1366,28 +2117,23 @@ fn resource_form(
     fields
     |> list.map(fn(f) {
       let #(field_name, field_type) = f
-      case field_type {
+      let value = "get_value(data, \"" <> field_name <> "\")"
+      "    "
+      <> field_name
+      <> ": "
+      <> case field_type {
         "bool" ->
-          "    "
-          <> field_name
-          <> ": list.any(data.values, fn(v) { v.0 == \""
-          <> field_name
-          <> "\" }),"
-        "int" ->
-          "    "
-          <> field_name
-          <> ": result.unwrap(int.parse(get_value(data, \""
-          <> field_name
-          <> "\")), 0),"
-        "float" ->
-          "    "
-          <> field_name
-          <> ": result.unwrap(float.parse(get_value(data, \""
-          <> field_name
-          <> "\")), 0.0),"
+          "list.any(data.values, fn(v) { v.0 == \"" <> field_name <> "\" })"
+        "int" -> "result.unwrap(int.parse(" <> value <> "), 0)"
+        "float" -> "result.unwrap(parse_float(" <> value <> "), 0.0)"
         _ ->
-          "    " <> field_name <> ": get_value(data, \"" <> field_name <> "\"),"
+          case is_optional(field_type) {
+            True ->
+              "optional(" <> value <> ", " <> optional_parser(field_type) <> ")"
+            False -> value
+          }
       }
+      <> ","
     })
     |> string.join("\n")
 
@@ -1408,21 +2154,43 @@ fn resource_form(
     })
     |> string.join("\n")
 
+  // string and text fields are required; an optional field may be blank,
+  // but a number or bool it holds must parse
   let validation_lines =
     fields
-    |> list.filter(fn(f) {
-      let #(_, t) = f
-      t == "string" || t == "text"
-    })
-    |> list.map(fn(f) {
-      let #(name, _) = f
-      "    |> validate.required("
-      <> name
-      <> ", \""
-      <> name
-      <> "\", \""
-      <> capitalize(name)
-      <> " is required\")"
+    |> list.filter_map(fn(f) {
+      let #(name, t) = f
+      let label = capitalize(name)
+      case t {
+        "string" | "text" ->
+          Ok(
+            "    |> validate.required("
+            <> name
+            <> ", \""
+            <> name
+            <> "\", \""
+            <> label
+            <> " is required\")",
+          )
+        "optional(int)" | "optional(float)" | "optional(bool)" ->
+          Ok(
+            "    |> must_parse("
+            <> name
+            <> ", "
+            <> optional_parser(t)
+            <> ", \""
+            <> name
+            <> "\", \""
+            <> label
+            <> case t {
+              "optional(int)" -> " must be a whole number"
+              "optional(float)" -> " must be a number"
+              _ -> " must be yes or no"
+            }
+            <> "\")",
+          )
+        _ -> Error(Nil)
+      }
     })
     |> string.join("\n")
 
@@ -1430,41 +2198,114 @@ fn resource_form(
     fields
     |> list.map(fn(f) {
       let #(name, t) = f
-      case t {
-        "bool" ->
-          "        "
-          <> name
-          <> ": list.any(data.values, fn(v) { v.0 == \""
-          <> name
-          <> "\" }),"
-        "int" ->
-          "        " <> name <> ": result.unwrap(int.parse(" <> name <> "), 0),"
-        "float" ->
-          "        "
-          <> name
-          <> ": result.unwrap(float.parse("
-          <> name
-          <> "), 0.0),"
-        _ -> "        " <> name <> ": " <> name <> ","
+      "        "
+      <> name
+      <> ": "
+      <> case t {
+        "bool" -> "list.any(data.values, fn(v) { v.0 == \"" <> name <> "\" })"
+        "int" -> "result.unwrap(int.parse(" <> name <> "), 0)"
+        "float" -> "result.unwrap(parse_float(" <> name <> "), 0.0)"
+        _ ->
+          case is_optional(t) {
+            True -> "optional(" <> name <> ", " <> optional_parser(t) <> ")"
+            False -> name
+          }
       }
+      <> ","
     })
     |> string.join("\n")
 
-  let extra_imports = case
-    list.any(fields, fn(f) { f.1 == "int" }),
-    list.any(fields, fn(f) { f.1 == "float" })
-  {
-    True, True -> "\nimport gleam/int\nimport gleam/float"
-    True, False -> "\nimport gleam/int"
-    False, True -> "\nimport gleam/float"
-    False, False -> ""
+  let has = fn(predicate: fn(String) -> Bool) {
+    list.any(fields, fn(f) { predicate(f.1) })
   }
+  let validate_import = case has(fn(t) { t == "string" || t == "text" }) {
+    True -> "\nimport refrakt/validate"
+    False -> ""
+  }
+  let has_float = has(fn(t) { base_type(t) == "float" })
+  let has_optional = has(is_optional)
+  let has_must_parse =
+    has(fn(t) {
+      t == "optional(int)" || t == "optional(float)" || t == "optional(bool)"
+    })
+
+  let extra_imports =
+    []
+    |> append_if(
+      has(fn(t) { base_type(t) == "int" }) || has_float,
+      "import gleam/int",
+    )
+    |> append_if(has_float, "import gleam/float")
+    |> append_if(has_optional, "import gleam/string")
+    |> list.map(fn(line) { "\n" <> line })
+    |> string.concat
+
+  // Helpers, only those the fields use (an unused function is a warning)
+  let helpers =
+    []
+    |> append_if(
+      has_optional,
+      "
+/// An optional field: blank is `None`, anything else is parsed (a value
+/// that does not parse is `None` too; `decode` reports it with
+/// `must_parse`).
+fn optional(value: String, parse: fn(String) -> Result(a, Nil)) -> Option(a) {
+  case string.trim(value) {
+    \"\" -> None
+    trimmed -> option.from_result(parse(trimmed))
+  }
+}",
+    )
+    |> append_if(
+      has_must_parse,
+      "
+/// Add an error when an optional field is not blank and does not parse.
+fn must_parse(
+  errors: List(#(String, String)),
+  value: String,
+  parse: fn(String) -> Result(a, Nil),
+  field: String,
+  message: String,
+) -> List(#(String, String)) {
+  case string.trim(value) {
+    \"\" -> errors
+    trimmed ->
+      case parse(trimmed) {
+        Ok(_) -> errors
+        Error(_) -> [#(field, message), ..errors]
+      }
+  }
+}",
+    )
+    |> append_if(
+      has_float,
+      "
+/// Parse a float, accepting whole numbers (`4`) as well as `4.0`.
+fn parse_float(value: String) -> Result(Float, Nil) {
+  case float.parse(value) {
+    Ok(number) -> Ok(number)
+    Error(_) -> int.parse(value) |> result.map(int.to_float)
+  }
+}",
+    )
+    |> append_if(
+      has(fn(t) { t == "optional(bool)" }),
+      "
+/// The values of an optional bool's select: blank, `true` or `false`.
+fn parse_bool(value: String) -> Result(Bool, Nil) {
+  case value {
+    \"true\" -> Ok(True)
+    \"false\" -> Ok(False)
+    _ -> Error(Nil)
+  }
+}",
+    )
+    |> string.concat
 
   "import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result" <> extra_imports <> "
-import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
-import refrakt/validate
+import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}" <> validate_import <> "
 import wisp
 
 pub type " <> type_name <> "Form {
@@ -1524,7 +2365,17 @@ fn get_value(data: wisp.FormData, key: String) -> String {
   |> result.map(fn(v) { v.1 })
   |> result.unwrap(\"\")
 }
-"
+" <> helpers
+}
+
+/// The parser `optional` and `must_parse` use for an optional field.
+fn optional_parser(field_type: String) -> String {
+  case base_type(field_type) {
+    "int" -> "int.parse"
+    "float" -> "parse_float"
+    "bool" -> "parse_bool"
+    _ -> "Ok"
+  }
 }
 
 fn resource_repo(
@@ -1533,12 +2384,108 @@ fn resource_repo(
   type_name: String,
   fields: List(#(String, String)),
   db: DbChoice,
+  relation: Option(Relation),
+  with_options: Bool,
 ) -> String {
-  case db {
-    Sqlite | NoDb ->
-      resource_repo_sqlite(app_name, resource_singular, type_name, fields)
-    Postgres ->
-      resource_repo_pog(app_name, resource_singular, type_name, fields)
+  let #(repo, relation_functions) = case db {
+    Sqlite | NoDb -> #(
+      resource_repo_sqlite(app_name, resource_singular, type_name, fields),
+      relation_functions_sqlite,
+    )
+    Postgres -> #(
+      resource_repo_pog(app_name, resource_singular, type_name, fields),
+      relation_functions_pog,
+    )
+  }
+  case relation {
+    None -> repo
+    Some(relation) ->
+      repo
+      <> relation_functions(
+        resource_singular,
+        type_name,
+        fields,
+        relation,
+        with_options,
+      )
+  }
+}
+
+/// The Sqlight decoder for one column.
+fn sqlite_decoder(field_type: String) -> String {
+  let decoder = case base_type(field_type) {
+    "bool" -> "sqlight.decode_bool()"
+    "int" -> "decode.int"
+    "float" -> "decode.float"
+    _ -> "decode.string"
+  }
+  case is_optional(field_type) {
+    True -> "decode.optional(" <> decoder <> ")"
+    False -> decoder
+  }
+}
+
+/// The Sqlight parameter for one field of the params.
+fn sqlite_parameter(name: String, field_type: String) -> String {
+  let encoder = case base_type(field_type) {
+    "bool" -> "sqlight.bool"
+    "int" -> "sqlight.int"
+    "float" -> "sqlight.float"
+    _ -> "sqlight.text"
+  }
+  case is_optional(field_type) {
+    // None is NULL
+    True -> "sqlight.nullable(" <> encoder <> ", params." <> name <> ")"
+    False -> encoder <> "(params." <> name <> ")"
+  }
+}
+
+/// The Pog decoder for one column.
+fn pog_decoder(field_type: String) -> String {
+  let decoder = case base_type(field_type) {
+    "bool" -> "decode.bool"
+    "int" -> "decode.int"
+    "float" -> "decode.float"
+    _ -> "decode.string"
+  }
+  case is_optional(field_type) {
+    True -> "decode.optional(" <> decoder <> ")"
+    False -> decoder
+  }
+}
+
+/// The Pog parameter for one field of the params.
+fn pog_parameter(name: String, field_type: String) -> String {
+  let encoder = case base_type(field_type) {
+    "bool" -> "pog.bool"
+    "int" -> "pog.int"
+    "float" -> "pog.float"
+    _ -> "pog.text"
+  }
+  case is_optional(field_type) {
+    // None is NULL
+    True -> "pog.nullable(" <> encoder <> ", params." <> name <> ")"
+    False -> encoder <> "(params." <> name <> ")"
+  }
+}
+
+/// A column in a Postgres SELECT or RETURNING list. Dates and timestamps
+/// are read as text, since the domain type holds them as strings.
+fn pog_select_column(field: #(String, String)) -> String {
+  case base_type(field.1) {
+    "date" | "datetime" -> field.0 <> "::text AS " <> field.0
+    _ -> field.0
+  }
+}
+
+/// The Postgres placeholder for a parameter. Dates and timestamps are sent
+/// as text and cast by Postgres.
+fn pog_placeholder(field: #(String, String), index: Int) -> String {
+  let placeholder = "$" <> int.to_string(index)
+  case base_type(field.1) {
+    "date" -> placeholder <> "::text::date"
+    "datetime" -> placeholder <> "::text::timestamptz"
+    _ -> placeholder
   }
 }
 
@@ -1557,12 +2504,7 @@ fn resource_repo_sqlite(
     fields
     |> list.index_map(fn(f, i) {
       let #(name, field_type) = f
-      let decode_fn = case field_type {
-        "bool" -> "sqlight.decode_bool()"
-        "int" -> "decode.int"
-        "float" -> "decode.float"
-        _ -> "decode.string"
-      }
+      let decode_fn = sqlite_decoder(field_type)
       "  use "
       <> name
       <> " <- decode.field("
@@ -1585,16 +2527,7 @@ fn resource_repo_sqlite(
 
   let insert_params =
     fields
-    |> list.map(fn(f) {
-      let #(name, field_type) = f
-      let sq_fn = case field_type {
-        "bool" -> "sqlight.bool"
-        "int" -> "sqlight.int"
-        "float" -> "sqlight.float"
-        _ -> "sqlight.text"
-      }
-      "    " <> sq_fn <> "(params." <> name <> "),"
-    })
+    |> list.map(fn(f) { "    " <> sqlite_parameter(f.0, f.1) <> "," })
     |> string.join("\n")
 
   let update_sets =
@@ -1766,6 +2699,12 @@ fn resource_repo_sqlite(
       "",
       "pub fn delete(db_path: String, id: Int) -> Result(Nil, Nil) {",
       "  use conn <- sqlight.with_connection(db_path)",
+      "  // SQLite enforces foreign keys, and so the ON DELETE CASCADE of",
+      "  // --belongs-to children, only on connections that turn them on.",
+      "  use _ <- result.try(",
+      "    sqlight.exec(\"PRAGMA foreign_keys = ON\", conn)",
+      "    |> result.replace_error(Nil),",
+      "  )",
       "  sqlight.query("
         <> q
         <> "DELETE FROM "
@@ -1793,18 +2732,15 @@ fn resource_repo_pog(
     |> list.map(fn(f) { f.0 })
     |> string.join(", ")
 
-  let select_fields = "id, " <> field_names
+  let select_fields =
+    ["id", ..list.map(fields, pog_select_column)]
+    |> string.join(", ")
 
   let decoder_fields =
     fields
     |> list.index_map(fn(f, i) {
       let #(name, field_type) = f
-      let decode_fn = case field_type {
-        "bool" -> "decode.bool"
-        "int" -> "decode.int"
-        "float" -> "decode.float"
-        _ -> "decode.string"
-      }
+      let decode_fn = pog_decoder(field_type)
       "  use "
       <> name
       <> " <- decode.field("
@@ -1822,26 +2758,19 @@ fn resource_repo_pog(
 
   let insert_placeholders =
     fields
-    |> list.index_map(fn(_, i) { "$" <> int.to_string(i + 1) })
+    |> list.index_map(fn(f, i) { pog_placeholder(f, i + 1) })
     |> string.join(", ")
 
   let insert_params =
     fields
     |> list.map(fn(f) {
-      let #(name, field_type) = f
-      let pog_fn = case field_type {
-        "bool" -> "pog.bool"
-        "int" -> "pog.int"
-        "float" -> "pog.float"
-        _ -> "pog.text"
-      }
-      "  |> pog.parameter(" <> pog_fn <> "(params." <> name <> "))"
+      "  |> pog.parameter(" <> pog_parameter(f.0, f.1) <> ")"
     })
     |> string.join("\n")
 
   let update_sets =
     fields
-    |> list.index_map(fn(f, i) { f.0 <> " = $" <> int.to_string(i + 1) })
+    |> list.index_map(fn(f, i) { f.0 <> " = " <> pog_placeholder(f, i + 1) })
     |> string.join(", ")
 
   let update_id_param = "$" <> int.to_string(list.length(fields) + 1)
@@ -2023,24 +2952,177 @@ fn resource_repo_pog(
   )
 }
 
+// --belongs-to repo functions -------------------------------------------------
+
+/// The SQL for the parents a child form offers: `id` and a label, the
+/// parent's first string field or `<Parent> #<id>`.
+fn options_sql(relation: Relation, label_cast: String) -> String {
+  case relation.label {
+    Some(label) ->
+      "SELECT id, "
+      <> label
+      <> label_cast
+      <> " FROM "
+      <> relation.table
+      <> " ORDER BY "
+      <> label
+      <> ", id"
+    None ->
+      "SELECT id, '"
+      <> relation.type_name
+      <> " #' || id FROM "
+      <> relation.table
+      <> " ORDER BY id"
+  }
+}
+
+fn options_doc(resource_singular: String, relation: Relation) -> String {
+  "/// The "
+  <> relation.plural
+  <> " a "
+  <> resource_singular
+  <> " can belong to, as `#(id, label)` pairs for the\n/// form's select."
+}
+
+fn list_for_doc(type_name: String, relation: Relation) -> String {
+  "/// The "
+  <> type_name
+  <> " records of one "
+  <> relation.singular
+  <> ", oldest first."
+}
+
+fn relation_functions_sqlite(
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+  with_options: Bool,
+) -> String {
+  let q = "\""
+  let select_fields =
+    ["id", ..list.map(fields, fn(f) { f.0 })] |> string.join(", ")
+  let table = resource_singular <> "s"
+  let list_for = "
+" <> list_for_doc(type_name, relation) <> "
+pub fn list_for_" <> relation.singular <> "(db_path: String, " <> relation.field <> ": Int) -> List(" <> type_name <> ") {
+  use conn <- sqlight.with_connection(db_path)
+  case
+    sqlight.query(
+      " <> q <> "SELECT " <> select_fields <> " FROM " <> table <> " WHERE " <> relation.field <> " = ? ORDER BY id" <> q <> ",
+      on: conn,
+      with: [sqlight.int(" <> relation.field <> ")],
+      expecting: " <> resource_singular <> "_decoder(),
+    )
+  {
+    Ok(rows) -> rows
+    Error(_) -> []
+  }
+}
+"
+  let options = case with_options {
+    False -> ""
+    True -> "
+" <> options_doc(resource_singular, relation) <> "
+pub fn " <> relation.singular <> "_options(db_path: String) -> List(#(Int, String)) {
+  use conn <- sqlight.with_connection(db_path)
+  let decoder = {
+    use id <- decode.field(0, decode.int)
+    use label <- decode.field(1, decode.string)
+    decode.success(#(id, label))
+  }
+  case
+    sqlight.query(
+      " <> q <> options_sql(relation, "") <> q <> ",
+      on: conn,
+      with: [],
+      expecting: decoder,
+    )
+  {
+    Ok(rows) -> rows
+    Error(_) -> []
+  }
+}
+"
+  }
+  list_for <> options
+}
+
+fn relation_functions_pog(
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+  with_options: Bool,
+) -> String {
+  let q = "\""
+  let select_fields =
+    ["id", ..list.map(fields, pog_select_column)] |> string.join(", ")
+  let table = resource_singular <> "s"
+  let list_for = "
+" <> list_for_doc(type_name, relation) <> "
+pub fn list_for_" <> relation.singular <> "(db: pog.Connection, " <> relation.field <> ": Int) -> List(" <> type_name <> ") {
+  pog.query(
+    " <> q <> "SELECT " <> select_fields <> " FROM " <> table <> " WHERE " <> relation.field <> " = $1 ORDER BY id" <> q <> ",
+  )
+  |> pog.parameter(pog.int(" <> relation.field <> "))
+  |> pog.returning(" <> resource_singular <> "_decoder())
+  |> pog.execute(db)
+  |> result.map(fn(r) { r.rows })
+  |> result.unwrap([])
+}
+"
+  let options = case with_options {
+    False -> ""
+    True -> "
+" <> options_doc(resource_singular, relation) <> "
+pub fn " <> relation.singular <> "_options(db: pog.Connection) -> List(#(Int, String)) {
+  let decoder = {
+    use id <- decode.field(0, decode.int)
+    use label <- decode.field(1, decode.string)
+    decode.success(#(id, label))
+  }
+  pog.query(" <> q <> options_sql(relation, "::text") <> q <> ")
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+  |> result.map(fn(r) { r.rows })
+  |> result.unwrap([])
+}
+"
+  }
+  list_for <> options
+}
+
 fn resource_migration(
   name: String,
   fields: List(#(String, String)),
   db: DbChoice,
+  relation: Option(Relation),
 ) -> String {
   let column_defs =
     fields
     |> list.map(fn(f) {
-      let #(field_name, field_type) = f
-      let sql_type = case db {
-        Sqlite -> to_sql_type_sqlite(field_type)
-        _ -> to_sql_type(field_type)
-      }
-      "  " <> field_name <> " " <> sql_type <> " NOT NULL"
+      "  " <> f.0 <> " " <> column_definition(f, db, relation)
     })
     |> string.join(",\n")
 
   let table = singularize(name) <> "s"
+
+  // The foreign key of --belongs-to is indexed: list_for_<parent> filters
+  // on it.
+  let index = case relation {
+    Some(relation) ->
+      "CREATE INDEX "
+      <> table
+      <> "_"
+      <> relation.field
+      <> "_index ON "
+      <> table
+      <> " ("
+      <> relation.field
+      <> ");\n"
+    None -> ""
+  }
 
   case db {
     Sqlite -> "CREATE TABLE " <> table <> " (
@@ -2049,14 +3131,14 @@ fn resource_migration(
   inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-"
+" <> index
     _ -> "CREATE TABLE " <> table <> " (
   id SERIAL PRIMARY KEY,
 " <> column_defs <> ",
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-"
+" <> index
   }
 }
 
@@ -2066,10 +3148,40 @@ fn api_resource_test(
   resource_singular: String,
   db: DbChoice,
   fields: List(#(String, String)),
+  parent: Option(ParentFixture),
 ) -> String {
   let handler = resource_singular <> "_handler"
   let form = resource_singular <> "_form"
   let path = "/api/" <> resource_plural
+
+  // With a --belongs-to parent, the bodies take the parent id: the tests
+  // without a database send 1, the DB-backed ones a parent they create
+  let #(body_param, static_arg, db_arg, parent_setup, parent_fn, parent_imports) = case
+    parent
+  {
+    None -> #("", "", "", "", "", "")
+    Some(parent) -> {
+      let field = parent.relation.field
+      #(
+        field <> ": Int",
+        "1",
+        field,
+        "\n  let "
+          <> field
+          <> " = create_"
+          <> parent.relation.singular
+          <> "(ctx)",
+        parent.create_fn,
+        parent.imports,
+      )
+    }
+  }
+  let json_value = fn(f: #(String, String), sample: fn(String) -> String) {
+    case parent {
+      Some(parent) if parent.relation.field == f.0 -> "json.int(" <> f.0 <> ")"
+      _ -> sample(f.1)
+    }
+  }
 
   let db_imports = case db {
     Postgres -> "\nimport gleam/erlang/process\nimport pog"
@@ -2087,14 +3199,14 @@ fn api_resource_test(
   let valid_fields =
     fields
     |> list.map(fn(f) {
-      "    #(\"" <> f.0 <> "\", " <> api_sample_json(f.1) <> "),"
+      "    #(\"" <> f.0 <> "\", " <> json_value(f, api_sample_json) <> "),"
     })
     |> string.join("\n")
 
   let updated_fields =
     fields
     |> list.map(fn(f) {
-      "    #(\"" <> f.0 <> "\", " <> api_updated_json(f.1) <> "),"
+      "    #(\"" <> f.0 <> "\", " <> json_value(f, api_updated_json) <> "),"
     })
     |> string.join("\n")
 
@@ -2175,7 +3287,7 @@ import " <> app_name <> "/context.{type Context, Context}
 import " <> app_name <> "/router
 import " <> app_name <> "/support/test_db
 import " <> app_name <> "/web/forms/" <> form <> "
-import " <> app_name <> "/web/" <> handler <> "
+import " <> app_name <> "/web/" <> handler <> parent_imports <> "
 import refrakt/testing
 import wisp/simulate
 
@@ -2185,7 +3297,7 @@ fn test_context() -> Context {
   Context(config: cfg, " <> test_db <> ")
 }
 
-fn valid_body() -> String {
+fn valid_body(" <> body_param <> ") -> String {
   json.object([
 " <> valid_fields <> "
   ])
@@ -2193,7 +3305,7 @@ fn valid_body() -> String {
 }
 
 pub fn decode_json_accepts_a_valid_body_test() {
-  let assert Ok(data) = json.parse(valid_body(), decode.dynamic)
+  let assert Ok(data) = json.parse(valid_body(" <> static_arg <> "), decode.dynamic)
 
   " <> form <> ".decode_json(data)
   |> should.be_ok
@@ -2217,7 +3329,7 @@ pub fn update_with_malformed_json_returns_400_test() {
 
 pub fn update_unknown_id_returns_404_test() {
   let response =
-    testing.json_request(http.Put, \"" <> path <> "/unknown\", valid_body())
+    testing.json_request(http.Put, \"" <> path <> "/unknown\", valid_body(" <> static_arg <> "))
     |> " <> handler <> ".update(test_context(), \"unknown\")
 
   response.status |> should.equal(404)
@@ -2242,10 +3354,10 @@ pub fn delete_unknown_id_returns_404_test() {
 // -- Against the test database -------------------------------------------
 
 pub fn create_show_update_delete_test() {
-  use ctx <- test_db.with_context()
+  use ctx <- test_db.with_context()" <> parent_setup <> "
 
   let created =
-    testing.json_request(http.Post, \"" <> path <> "\", valid_body())
+    testing.json_request(http.Post, \"" <> path <> "\", valid_body(" <> db_arg <> "))
     |> router.handle_request(ctx)
   created.status |> should.equal(201)
   let assert Ok(path) = response.get_header(created, \"location\")
@@ -2254,7 +3366,7 @@ pub fn create_show_update_delete_test() {
   shown.status |> should.equal(200)
 
   let updated =
-    testing.json_request(http.Put, path, updated_body())
+    testing.json_request(http.Put, path, updated_body(" <> db_arg <> "))
     |> router.handle_request(ctx)
   updated.status |> should.equal(200)" <> updated_check <> "
 
@@ -2265,11 +3377,11 @@ pub fn create_show_update_delete_test() {
 }
 
 pub fn index_is_paginated_test() {
-  use ctx <- test_db.with_context()
+  use ctx <- test_db.with_context()" <> parent_setup <> "
   list.repeat(Nil, 3)
   |> list.each(fn(_) {
     let created =
-      testing.json_request(http.Post, \"" <> path <> "\", valid_body())
+      testing.json_request(http.Post, \"" <> path <> "\", valid_body(" <> db_arg <> "))
       |> router.handle_request(ctx)
     created.status |> should.equal(201)
   })
@@ -2298,13 +3410,98 @@ fn index_page(path: String, ctx: Context) -> #(Int, Int, Int) {
   page
 }
 
-fn updated_body() -> String {
+fn updated_body(" <> body_param <> ") -> String {
   json.object([
 " <> updated_fields <> "
   ])
   |> json.to_string
-}
+}" <> parent_fn <> "
 "
+}
+
+/// A parent row for the DB-backed tests of a `--belongs-to` resource.
+type ParentFixture {
+  ParentFixture(
+    relation: Relation,
+    /// `fn create_<parent>(ctx: Context) -> Int` and the imports it needs
+    create_fn: String,
+    imports: String,
+  )
+}
+
+/// Build the parent of the generated tests from the parent's params type
+/// (`web/forms/<parent>_form.gleam`): a placeholder per field, `None` for
+/// optional ones. `None` when the params type cannot be read.
+fn parent_fixture(
+  app: String,
+  relation: Relation,
+  db: DbChoice,
+) -> Option(ParentFixture) {
+  let form = relation.singular <> "_form"
+  let params = relation.type_name <> "Params"
+  let path = "src/" <> app <> "/web/forms/" <> form <> ".gleam"
+  let db_arg = case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
+  let fields = {
+    use content <- result.try(
+      simplifile.read(path) |> result.replace_error(Nil),
+    )
+    use #(_, after) <- result.try(string.split_once(
+      content,
+      "pub type " <> params <> " {",
+    ))
+    use #(_, after) <- result.try(string.split_once(after, "("))
+    use #(body, _) <- result.try(string.split_once(after, "\n}"))
+    body
+    |> string.trim
+    |> string.drop_end(1)
+    |> string.split(",")
+    |> list.filter(fn(field) { string.trim(field) != "" })
+    |> list.try_map(fn(field) {
+      use #(name, gleam_type) <- result.try(string.split_once(field, ":"))
+      let value = case string.trim(gleam_type) {
+        // also a valid date and timestamp
+        "String" -> "\"2026-01-01\""
+        "Int" -> "1"
+        "Float" -> "1.0"
+        "Bool" -> "True"
+        "Option(" <> _ -> "option.None"
+        _ -> ""
+      }
+      case value {
+        "" -> Error(Nil)
+        _ -> Ok(string.trim(name) <> ": " <> value)
+      }
+    })
+  }
+  case fields {
+    Error(_) -> None
+    Ok(fields) -> {
+      let args = string.join(fields, ", ")
+      let option_import = case string.contains(args, "option.None") {
+        True -> "\nimport gleam/option"
+        False -> ""
+      }
+      Some(ParentFixture(relation: relation, create_fn: "
+
+/// A " <> relation.singular <> " for the records to belong to.
+fn create_" <> relation.singular <> "(ctx: Context) -> Int {
+  let assert Ok(" <> relation.singular <> ") =
+    " <> relation.singular <> "_repo.create(" <> db_arg <> ", " <> form <> "." <> params <> "(" <> args <> "))
+  " <> relation.singular <> ".id
+}", imports: option_import
+        <> "\nimport "
+        <> app
+        <> "/data/"
+        <> relation.singular
+        <> "_repo\nimport "
+        <> app
+        <> "/web/forms/"
+        <> form))
+    }
+  }
 }
 
 fn resource_test(
@@ -2313,7 +3510,38 @@ fn resource_test(
   resource_singular: String,
   fields: List(#(String, String)),
   db: DbChoice,
+  rerender_test: Bool,
+  parent: Option(ParentFixture),
 ) -> String {
+  // With a --belongs-to parent, the DB-backed tests create one and send
+  // its id instead of the sample value
+  let #(parent_setup, with_parent, sample_fields, parent_fn, parent_imports) = case
+    parent
+  {
+    None -> #("", fn(values: String) { values }, fields, "", "")
+    Some(parent) -> {
+      let field = parent.relation.field
+      #(
+        "\n  let "
+          <> field
+          <> " = create_"
+          <> parent.relation.singular
+          <> "(ctx)",
+        fn(values: String) {
+          "[#(\""
+          <> field
+          <> "\", int.to_string("
+          <> field
+          <> ")), .."
+          <> values
+          <> "]"
+        },
+        list.filter(fields, fn(f) { f.0 != field }),
+        parent.create_fn,
+        "\nimport gleam/int" <> parent.imports,
+      )
+    }
+  }
   // Build valid form data for decode test
   let valid_values =
     fields
@@ -2321,8 +3549,9 @@ fn resource_test(
       let #(name, ftype) = f
       let val = case ftype {
         "bool" -> "on"
-        "int" -> "42"
-        "float" -> "3.14"
+        "optional(bool)" -> "true"
+        "int" | "optional(int)" -> "42"
+        "float" | "optional(float)" -> "3.14"
         _ -> "test value"
       }
       "    #(\"" <> name <> "\", \"" <> val <> "\"),"
@@ -2344,7 +3573,9 @@ pub fn decode_missing_" <> name <> "_returns_error_test() {
   " <> resource_singular <> "_form.decode(data)
   |> should.be_error
 }
-
+" <> case rerender_test {
+        False -> ""
+        True -> "
 pub fn same_origin_invalid_create_rerenders_form_test() {
   // browser_request sends an Origin header matching the host, as a
   // browser does when it submits the form on /" <> resource_plural <> "/new.
@@ -2357,6 +3588,7 @@ pub fn same_origin_invalid_create_rerenders_form_test() {
   |> should.equal(422)
 }
 "
+      }
     [] -> ""
   }
 
@@ -2385,11 +3617,11 @@ pub fn same_origin_invalid_create_rerenders_form_test() {
 // -- Against the test database: test/" <> app_name <> "/support/test_db.gleam --
 
 pub fn create_show_update_delete_test() {
-  use ctx <- test_db.with_context()
+  use ctx <- test_db.with_context()" <> parent_setup <> "
 
   let created =
     simulate.browser_request(http.Post, \"" <> path <> "\")
-    |> simulate.form_body(form_values())
+    |> simulate.form_body(" <> with_parent("form_values()") <> ")
     |> router.handle_request(ctx)
   created.status |> should.equal(303)
   let assert Ok(path) = response.get_header(created, \"location\")
@@ -2399,7 +3631,7 @@ pub fn create_show_update_delete_test() {
 
   let updated =
     simulate.browser_request(http.Put, path)
-    |> simulate.form_body(updated_form_values())
+    |> simulate.form_body(" <> with_parent("updated_form_values()") <> ")
     |> router.handle_request(ctx)
   updated.status |> should.equal(303)" <> updated_check <> "
 
@@ -2411,13 +3643,13 @@ pub fn create_show_update_delete_test() {
 }
 
 pub fn index_is_paginated_test() {
-  use ctx <- test_db.with_context()
+  use ctx <- test_db.with_context()" <> parent_setup <> "
   // One more than fits on a page
   list.repeat(Nil, " <> handler <> ".per_page + 1)
   |> list.each(fn(_) {
     let created =
       simulate.browser_request(http.Post, \"" <> path <> "\")
-      |> simulate.form_body(form_values())
+      |> simulate.form_body(" <> with_parent("form_values()") <> ")
       |> router.handle_request(ctx)
     created.status |> should.equal(303)
   })
@@ -2451,15 +3683,15 @@ fn count_items(html: String) -> Int {
 
 fn form_values() -> List(#(String, String)) {
   [
-" <> sample_form_values(fields, False) <> "
+" <> sample_form_values(sample_fields, False) <> "
   ]
 }
 
 fn updated_form_values() -> List(#(String, String)) {
   [
-" <> sample_form_values(fields, True) <> "
+" <> sample_form_values(sample_fields, True) <> "
   ]
-}
+}" <> parent_fn <> "
 "
 
   "import gleam/http
@@ -2472,7 +3704,7 @@ import " <> app_name <> "/context.{type Context}
 import " <> app_name <> "/router
 import " <> app_name <> "/support/test_db
 import " <> app_name <> "/web/" <> handler <> "
-import " <> app_name <> "/web/forms/" <> resource_singular <> "_form" <> context_imports <> "
+import " <> app_name <> "/web/forms/" <> resource_singular <> "_form" <> context_imports <> parent_imports <> "
 import wisp
 import wisp/simulate
 
@@ -2532,7 +3764,15 @@ fn ensure_test_db(app: String, db: DbChoice) -> Result(String, Nil) {
 /// A form value the generated form accepts for a field, for the tests
 /// that create and update rows. `updated` gives a different one.
 fn sample_form_value(field_type: String, updated: Bool) -> String {
-  case unwrap_optional(field_type), updated {
+  case field_type, updated {
+    "optional(bool)", False -> "true"
+    "optional(bool)", True -> "false"
+    _, _ -> plain_sample_form_value(unwrap_optional(field_type), updated)
+  }
+}
+
+fn plain_sample_form_value(field_type: String, updated: Bool) -> String {
+  case field_type, updated {
     "bool", _ -> "on"
     "int", False -> "42"
     "int", True -> "7"
@@ -2733,27 +3973,185 @@ fn add_route(content: String, route_line: String) -> String {
 // Field parsing and type conversion
 // =============================================================================
 
-pub fn parse_fields(raw: List(String)) -> List(#(String, String)) {
-  raw
-  |> list.filter_map(fn(field) {
-    case string.split(field, ":") {
-      [name, field_type] -> Ok(#(name, field_type))
-      _ -> Error(Nil)
+/// The field types `gen resource` knows, besides `optional(<type>)`.
+const field_types = [
+  "string",
+  "text",
+  "int",
+  "float",
+  "bool",
+  "date",
+  "datetime",
+]
+
+/// Parse `name:type` field specs. A type is one of `field_types` or
+/// `optional(<one of them>)`; the result holds the normalized type
+/// (`optional(float)`), or a message saying which spec is wrong.
+pub fn parse_fields(
+  raw: List(String),
+) -> Result(List(#(String, String)), String) {
+  use fields <- result.try(list.try_map(raw, parse_field))
+  case find_duplicate(list.map(fields, fn(f) { f.0 }), []) {
+    Ok(name) -> Error("Field `" <> name <> "` is given more than once.")
+    Error(_) -> Ok(fields)
+  }
+}
+
+/// Parse one `name:type` field spec, such as `price:optional(float)`.
+pub fn parse_field(spec: String) -> Result(#(String, String), String) {
+  case string.split_once(spec, ":") {
+    Error(_) ->
+      Error(
+        "Invalid field `"
+        <> spec
+        <> "`: expected name:type, such as title:string or price:optional(float).",
+      )
+    Ok(#(name, field_type)) -> {
+      use name <- result.try(check_field_name(name, spec))
+      use field_type <- result.try(parse_field_type(field_type, name))
+      Ok(#(name, field_type))
     }
-  })
+  }
+}
+
+fn check_field_name(name: String, spec: String) -> Result(String, String) {
+  let valid_chars = string.to_graphemes("abcdefghijklmnopqrstuvwxyz0123456789_")
+  let starts_with_letter = case string.pop_grapheme(name) {
+    Ok(#(first, _)) -> string.contains("abcdefghijklmnopqrstuvwxyz", first)
+    Error(_) -> False
+  }
+  let only_valid_chars =
+    list.all(string.to_graphemes(name), list.contains(valid_chars, _))
+  case name {
+    "id" | "inserted_at" | "updated_at" ->
+      Error(
+        "Invalid field `"
+        <> spec
+        <> "`: `"
+        <> name
+        <> "` is a column every resource already has.",
+      )
+    _ if starts_with_letter && only_valid_chars -> Ok(name)
+    _ ->
+      Error(
+        "Invalid field name in `"
+        <> spec
+        <> "`: use lowercase letters, digits and underscores, starting with a letter.",
+      )
+  }
+}
+
+fn parse_field_type(
+  field_type: String,
+  field_name: String,
+) -> Result(String, String) {
+  let field_type = string.lowercase(string.trim(field_type))
+  let unknown = fn(found: String) {
+    Error(
+      "Unknown type `"
+      <> found
+      <> "` for field `"
+      <> field_name
+      <> "`. Use one of: "
+      <> string.join(field_types, ", ")
+      <> ", or optional(<type>) for a nullable field, such as optional(float).",
+    )
+  }
+  case string.starts_with(field_type, "optional(") {
+    True ->
+      case string.ends_with(field_type, ")") {
+        False -> unknown(field_type)
+        True -> {
+          let inner =
+            field_type
+            |> string.drop_start(string.length("optional("))
+            |> string.drop_end(1)
+            |> string.trim
+          case list.contains(field_types, inner) {
+            True -> Ok("optional(" <> inner <> ")")
+            False -> unknown(field_type)
+          }
+        }
+      }
+    False ->
+      case list.contains(field_types, field_type) {
+        True -> Ok(field_type)
+        False -> unknown(field_type)
+      }
+  }
+}
+
+fn find_duplicate(
+  names: List(String),
+  seen: List(String),
+) -> Result(String, Nil) {
+  case names {
+    [] -> Error(Nil)
+    [name, ..rest] ->
+      case list.contains(seen, name) {
+        True -> Ok(name)
+        False -> find_duplicate(rest, [name, ..seen])
+      }
+  }
+}
+
+/// Whether a field type is `optional(<type>)`: a nullable column and an
+/// `Option` in Gleam.
+pub fn is_optional(field_type: String) -> Bool {
+  string.starts_with(field_type, "optional(")
+}
+
+/// The type inside `optional(<type>)`, or the type itself.
+pub fn base_type(field_type: String) -> String {
+  case is_optional(field_type) {
+    True ->
+      field_type
+      |> string.drop_start(string.length("optional("))
+      |> string.drop_end(1)
+    False -> field_type
+  }
 }
 
 pub fn to_gleam_type(field_type: String) -> String {
-  case field_type {
-    "string" -> "String"
-    "text" -> "String"
-    "int" -> "Int"
-    "float" -> "Float"
-    "bool" -> "Bool"
-    "date" -> "String"
-    "datetime" -> "String"
-    _ -> "String"
+  case is_optional(field_type) {
+    True -> "Option(" <> to_gleam_type(base_type(field_type)) <> ")"
+    False ->
+      case field_type {
+        "string" -> "String"
+        "text" -> "String"
+        "int" -> "Int"
+        "float" -> "Float"
+        "bool" -> "Bool"
+        "date" -> "String"
+        "datetime" -> "String"
+        _ -> "String"
+      }
   }
+}
+
+/// The column definition after the column name: the SQL type, `NOT NULL`
+/// unless the field is optional, and for the `--belongs-to` field a
+/// foreign key to the parent.
+fn column_definition(
+  field: #(String, String),
+  db: DbChoice,
+  relation: Option(Relation),
+) -> String {
+  let #(field_name, field_type) = field
+  let sql_type = case db {
+    Sqlite -> to_sql_type_sqlite(base_type(field_type))
+    _ -> to_sql_type(base_type(field_type))
+  }
+  let null = case is_optional(field_type) {
+    True -> ""
+    False -> " NOT NULL"
+  }
+  let reference = case relation {
+    Some(relation) if relation.field == field_name ->
+      " REFERENCES " <> relation.table <> "(id) ON DELETE CASCADE"
+    _ -> ""
+  }
+  sql_type <> null <> reference
 }
 
 pub fn to_sql_type(field_type: String) -> String {
@@ -2783,6 +4181,13 @@ fn to_sql_type_sqlite(field_type: String) -> String {
 }
 
 fn form_default_value(field_type: String) -> String {
+  case is_optional(field_type) {
+    True -> "None"
+    False -> plain_default_value(field_type)
+  }
+}
+
+fn plain_default_value(field_type: String) -> String {
   case field_type {
     "bool" -> "False"
     "int" -> "0"
@@ -3635,14 +5040,6 @@ fn capitalize(s: String) -> String {
   case string.pop_grapheme(s) {
     Ok(#(first, rest)) -> string.uppercase(first) <> rest
     Error(_) -> s
-  }
-}
-
-fn extract_flag_value(args: List(String), flag: String) -> Result(String, Nil) {
-  case args {
-    [] -> Error(Nil)
-    [f, value, ..] if f == flag -> Ok(value)
-    [_, ..rest] -> extract_flag_value(rest, flag)
   }
 }
 

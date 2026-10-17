@@ -14,7 +14,16 @@ Example:
 ```bash
 refrakt gen resource posts title:string body:text published:bool
 refrakt gen resource products name:string price:float stock:int
+refrakt gen resource events title:string 'starts_on:optional(date)' 'capacity:optional(int)'
 ```
+
+Quote `optional(...)` specs: the parentheses are shell syntax in bash
+and zsh.
+
+Field names are lowercase letters, digits and underscores, starting
+with a letter. `id`, `inserted_at` and `updated_at` are taken: every
+table has them. An unknown type, a malformed spec or a repeated name is
+an error, and nothing is generated.
 
 ## Available types
 
@@ -27,6 +36,11 @@ refrakt gen resource products name:string price:float stock:int
 | `bool` | `Bool` | `<input type="checkbox">` | `BOOLEAN` | `INTEGER` |
 | `date` | `String` | `<input type="text">` | `DATE` | `TEXT` |
 | `datetime` | `String` | `<input type="text">` | `TIMESTAMPTZ` | `TEXT` |
+| `optional(T)` | `Option(T)` | as for `T`; `optional(bool)` is a `<select>` | `T`, nullable | `T`, nullable |
+
+`T` in `optional(T)` is any type above: `optional(string)`,
+`optional(text)`, `optional(int)`, `optional(float)`, `optional(bool)`,
+`optional(date)` or `optional(datetime)`.
 
 ## How types affect generated code
 
@@ -74,6 +88,39 @@ Stored as strings in Gleam. The SQL type is `DATE` / `TIMESTAMPTZ`
 for Postgres and `TEXT` for SQLite. You may want to add proper
 date parsing and formatting in your domain layer.
 
+On Postgres the repo reads these columns as text (`starts_on::text`)
+and sends them as text for Postgres to cast (`$2::text::date`), so a
+value such as `2026-10-17` or `2026-10-17 09:30:00+00` round-trips as a
+`String`.
+
+### `optional(T)`
+
+A field that may have no value: `Option(T)` in the domain type, the
+form and the params, and a nullable column (no `NOT NULL`).
+
+- Migration: the column type of `T` without `NOT NULL`
+- Repo: `pog.nullable(pog.int, params.capacity)` /
+  `sqlight.nullable(sqlight.int, params.capacity)`; decoded with
+  `decode.optional(decode.int)`. `None` is `NULL`.
+- Form: a blank input (after trimming) is `None`; anything else is
+  parsed as `T`. Optional fields are never `required`, but a non-blank
+  `optional(int)`, `optional(float)` or `optional(bool)` value that does
+  not parse is a validation error (422), such as "Capacity must be a
+  whole number".
+- Form view: `None` renders as an empty input.
+- Show view: `None` renders as `—` (an em dash).
+- JSON API (`--api`): a missing key or `null` is `None`; `None` is
+  encoded as `null` (`json.nullable`). An empty string stays
+  `Some("")` in JSON.
+
+#### `optional(bool)`
+
+A checkbox cannot say "not set": an unchecked box sends nothing, just
+like an untouched one. An `optional(bool)` field is a `<select>` with a
+blank option (`—`, `None`), `Yes` (`true`) and `No` (`false`). Any other
+submitted value is a 422 ("... must be yes or no"). In JSON it is
+`true`, `false` or `null`.
+
 ## Default values in forms
 
 | Type | Empty form value |
@@ -85,6 +132,13 @@ date parsing and formatting in your domain layer.
 | `bool` | `False` |
 | `date` | `""` |
 | `datetime` | `""` |
+| `optional(T)` | `None` |
+
+## Foreign keys (`--belongs-to`)
+
+`--belongs-to posts` adds a `post_id` field of type `int` with a
+foreign key to `posts(id)`. See
+[Relations](database.md#relations---belongs-to).
 
 ## All generated columns
 

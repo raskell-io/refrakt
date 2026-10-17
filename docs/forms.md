@@ -214,7 +214,49 @@ div([class("field")], [
 | `string` | `String` | `<input type="text">` | Direct string |
 | `text` | `String` | `<textarea>` | Direct string |
 | `int` | `Int` | `<input type="number">` | `int.parse` |
-| `float` | `Float` | `<input type="number">` | `float.parse` |
+| `float` | `Float` | `<input type="number" step="any">` | `parse_float` (accepts `4` and `4.0`) |
 | `bool` | `Bool` | `<input type="checkbox">` | Check if field present |
 | `date` | `String` | `<input type="text">` | Direct string |
 | `datetime` | `String` | `<input type="text">` | Direct string |
+| `optional(T)` | `Option(T)` | As for `T`, empty for `None` | Blank is `None`, else parsed as `T` |
+| `optional(bool)` | `Option(Bool)` | `<select>`: blank, Yes, No | `""` is `None`, `"true"`/`"false"` |
+| `--belongs-to` field | `Int` | `<select>` of the parents | `int.parse` |
+
+### Optional fields
+
+An `optional(T)` field is `Option(T)` in the form and the params. The
+generated form module gets two small helpers:
+
+```gleam
+// Blank is None; anything else is parsed
+price: optional(price, parse_float),
+
+// In decode: a non-blank number that does not parse is an error
+let errors =
+  []
+  |> validate.required(name, "name", "Name is required")
+  |> must_parse(price, parse_float, "price", "Price must be a number")
+```
+
+Optional fields are not `required`. See
+[Field Types](field-types.md#optionalt) for `optional(bool)`, which is
+a select because a checkbox cannot say "not set".
+
+### Parent selects (`--belongs-to`)
+
+For `gen resource comments body:text --belongs-to posts`, `form_view`
+takes the posts to choose from as a third argument:
+
+```gleam
+pub fn form_view(
+  values: comment_form.CommentForm,
+  errors: List(#(String, String)),
+  post_options: List(#(Int, String)),
+) -> Element(Nil)
+```
+
+The handler passes `comment_repo.post_options(db)` (`#(id, label)`
+pairs, labelled with the post's first string field, or `Post #<id>`).
+After `decode`, `create` and `update` check that the post exists; a
+missing one re-renders the form with "Post does not exist" (422).
+`/comments/new?post_id=<id>` preselects a post.

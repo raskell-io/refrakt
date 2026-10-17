@@ -5,7 +5,8 @@
 #   1. `refrakt_cli new app [--db ...]`, run from packages/refrakt_cli
 #   2. point the app at the in-repo library and CLI (path dependencies),
 #      so the check covers HEAD rather than whatever is on Hex
-#   3. `gen resource posts ...`, `gen resource memos ... --api`, `gen page
+#   3. `gen resource posts ...`, `gen resource memos ... --api`, resources
+#      with optional(T) fields and a `--belongs-to posts` child, `gen page
 #      about`, and `gen auth` when the app has a database, all run through
 #      the app's own dev-dependency
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`.
@@ -17,7 +18,8 @@
 #      check that APP_ENV=prod refuses a missing, development or short
 #      SECRET_KEY_BASE, boot the app and smoke-test /posts, CSRF
 #      rejection, the /api/memos JSON API, the register/login/logout
-#      flow and pagination of /posts and /api/memos with curl
+#      flow, pagination of /posts and /api/memos, optional fields and
+#      relations with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -205,6 +207,182 @@ SQL
     fail "a second migrate applied migrations again"
 }
 
+# -----------------------------------------------------------------------------
+# optional(T) fields (#35) and --belongs-to relations (#23)
+#
+# generate_optional_and_relations runs inside the app directory, after
+# `gen resource posts`. It generates
+#   - products: optional fields of every kind (HTML form)
+#   - gadgets: optional fields in an --api resource
+#   - comments: `--belongs-to posts`, which patches the post's show page
+# and checks that an unknown field type and a missing parent are refused
+# without writing files. smoke_test_optional_and_relations exercises them
+# against the running app.
+# -----------------------------------------------------------------------------
+
+generate_optional_and_relations() {
+  local output
+  cli gen resource products name:string 'price:optional(float)' \
+    'stock:optional(int)' 'note:optional(text)' 'featured:optional(bool)' \
+    'released:optional(date)'
+  cli gen resource gadgets label:string 'weight:optional(float)' \
+    'count:optional(int)' 'active:optional(bool)' 'code:optional(string)' --api
+  cli gen resource comments body:text --belongs-to posts
+  grep -q "comment_list.render(" src/app/web/post_handler.gleam ||
+    fail "gen resource comments --belongs-to posts did not patch the post's show handler"
+
+  output="$(cli gen resource widgets 'size:optional(money)')"
+  echo "$output"
+  echo "$output" | grep -q "Unknown type" || fail "an unknown field type was not refused"
+  [ ! -e src/app/web/widget_handler.gleam ] || fail "an unknown field type wrote files"
+
+  output="$(cli gen resource drafts body:text --belongs-to nopes)"
+  echo "$output"
+  echo "$output" | grep -q "there is no nopes resource" ||
+    fail "--belongs-to a missing resource was not refused"
+  [ ! -e src/app/web/draft_handler.gleam ] ||
+    fail "--belongs-to a missing resource wrote files"
+}
+
+# body_has <text> <what> / body_lacks <text> <what>: check the last response
+body_has() {
+  grep -qF -- "$1" "$work/body.html" || {
+    cat "$work/body.html" >&2
+    fail "$2: response lacks $1"
+  }
+}
+body_lacks() {
+  if grep -qF -- "$1" "$work/body.html"; then
+    cat "$work/body.html" >&2
+    fail "$2: response contains $1"
+  fi
+}
+
+# location -> the Location header of the last request made with
+# `-D "$work/headers"`
+location() {
+  grep -i "^location:" "$work/headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//'
+}
+
+smoke_test_optional_and_relations() {
+  local product_path post_path post_id comment_path value
+
+  step "Smoke-testing optional fields (/products)"
+  expect 303 "$(status POST /products -D "$work/headers" \
+    --data-urlencode "name=All blank" --data-urlencode "price=" \
+    --data-urlencode "stock=" --data-urlencode "note=" \
+    --data-urlencode "featured=" --data-urlencode "released=")" \
+    "POST /products with blank optional fields"
+  product_path="$(location)"
+  [ -n "$product_path" ] || fail "POST /products did not redirect to the product"
+  expect 200 "$(status GET "$product_path")" "GET $product_path"
+  body_has "All blank" "GET $product_path"
+  # price, stock, note, featured and released are NULL: an em dash each
+  [ "$(grep -o '<dd>—</dd>' "$work/body.html" | wc -l | tr -d ' ')" = 5 ] || {
+    cat "$work/body.html" >&2
+    fail "GET $product_path: blank optional fields do not show as —"
+  }
+  echo "ok  blank optional fields are NULL and show as —"
+  expect 200 "$(status GET "$product_path/edit")" "GET $product_path/edit"
+  # Lustre sorts attributes and writes an empty value as a bare `value`
+  body_has '<input name="price" step="any" type="number" value>' \
+    "GET $product_path/edit renders a NULL price as blank"
+  body_has '<option selected value>' "GET $product_path/edit selects the blank featured"
+
+  expect 303 "$(status POST /products -D "$work/headers" \
+    --data-urlencode "name=All set" --data-urlencode "price=4" \
+    --data-urlencode "stock=7" --data-urlencode "note=Handle with care" \
+    --data-urlencode "featured=true" --data-urlencode "released=2026-10-17")" \
+    "POST /products with optional values"
+  product_path="$(location)"
+  expect 200 "$(status GET "$product_path")" "GET $product_path"
+  for value in "<dd>4.0</dd>" "<dd>7</dd>" "<dd>Handle with care</dd>" \
+    "<dd>Yes</dd>" "<dd>2026-10-17</dd>"; do
+    body_has "$value" "GET $product_path"
+  done
+  echo "ok  optional values round-trip"
+
+  expect 422 "$(status POST /products --data-urlencode "name=Bad price" \
+    --data-urlencode "price=cheap")" "POST /products with a price that is not a number"
+  body_has "Price must be a number" "POST /products with a bad price"
+  expect 422 "$(status POST /products --data-urlencode "name=Bad stock" \
+    --data-urlencode "stock=1.5")" "POST /products with a stock that is not a whole number"
+  expect 422 "$(status POST /products --data-urlencode "name=Bad flag" \
+    --data-urlencode "featured=maybe")" "POST /products with a featured that is not yes/no"
+
+  expect 303 "$(status POST "$product_path?_method=PUT" \
+    --data-urlencode "name=All set" --data-urlencode "price=" \
+    --data-urlencode "stock=7" --data-urlencode "featured=false")" \
+    "PUT $product_path clearing the price"
+  expect 200 "$(status GET "$product_path")" "GET $product_path after clearing the price"
+  body_has "<dd>No</dd>" "GET $product_path after update"
+  body_lacks "<dd>4.0</dd>" "GET $product_path after clearing the price"
+
+  step "Smoke-testing optional fields in the JSON API (/api/gadgets)"
+  expect 201 "$(api POST /api/gadgets \
+    '{"label":"Nulls","weight":null,"count":null,"active":null,"code":null}')" \
+    "POST /api/gadgets with null optional fields"
+  for value in '"weight":null' '"count":null' '"active":null' '"code":null'; do
+    api_body_has "$value" "POST /api/gadgets with nulls"
+  done
+  expect 201 "$(api POST /api/gadgets '{"label":"Missing"}')" \
+    "POST /api/gadgets with optional fields left out"
+  api_body_has '"weight":null' "POST /api/gadgets with missing keys"
+  api_body_has '"count":null' "POST /api/gadgets with missing keys"
+  expect 201 "$(api POST /api/gadgets \
+    '{"label":"Values","weight":2,"count":3,"active":false,"code":"G-1"}')" \
+    "POST /api/gadgets with optional values"
+  for value in '"weight":2.0' '"count":3' '"active":false' '"code":"G-1"'; do
+    api_body_has "$value" "POST /api/gadgets with values"
+  done
+  expect 400 "$(api POST /api/gadgets '{"label":"Bad","count":"many"}')" \
+    "POST /api/gadgets with a count that is not a number"
+  # The index answers the pagination envelope, with null for None
+  expect 200 "$(api GET /api/gadgets)" "GET /api/gadgets"
+  for value in '"data":[' '"total":3' '"label":"Nulls","weight":null'; do
+    api_body_has "$value" "GET /api/gadgets"
+  done
+
+  step "Smoke-testing --belongs-to (/posts and /comments)"
+  expect 303 "$(status POST /posts -D "$work/headers" \
+    --data-urlencode "title=Parent post" --data-urlencode "body=Has comments")" \
+    "POST /posts (parent)"
+  post_path="$(location)"
+  post_id="${post_path##*/}"
+  [ -n "$post_id" ] || fail "POST /posts did not redirect to the post"
+  expect 200 "$(status GET "/comments/new?post_id=$post_id")" \
+    "GET /comments/new?post_id=$post_id"
+  body_has "Parent post" "GET /comments/new (the select offers the post)"
+  body_has "<option selected value=\"$post_id\">" \
+    "GET /comments/new?post_id=$post_id preselects the post"
+
+  expect 303 "$(status POST /comments -D "$work/headers" \
+    --data-urlencode "body=First comment" --data-urlencode "post_id=$post_id")" \
+    "POST /comments for $post_path"
+  comment_path="$(location)"
+  expect 200 "$(status GET "$comment_path")" "GET $comment_path"
+  body_has "href=\"$post_path\"" "GET $comment_path links to its post"
+  expect 422 "$(status POST /comments --data-urlencode "body=Lost" \
+    --data-urlencode "post_id=999999")" "POST /comments for a missing post"
+  body_has "Post does not exist" "POST /comments for a missing post"
+  expect 422 "$(status POST /comments --data-urlencode "body=No post")" \
+    "POST /comments without a post"
+  expect 422 "$(status POST "$comment_path?_method=PUT" --data-urlencode "body=Moved" \
+    --data-urlencode "post_id=999999")" "PUT $comment_path to a missing post"
+
+  expect 200 "$(status GET "$post_path")" "GET $post_path"
+  body_has "First comment" "GET $post_path lists its comments"
+  body_has "href=\"$comment_path\"" "GET $post_path links to the comment"
+  body_has "/comments/new?post_id=$post_id" "GET $post_path links to a new comment"
+
+  # ON DELETE CASCADE: deleting the post deletes its comments
+  expect 303 "$(status POST "$post_path?_method=DELETE")" "DELETE $post_path"
+  expect 404 "$(status GET "$comment_path")" "GET $comment_path after deleting its post"
+  expect 200 "$(status GET /comments)" "GET /comments after deleting the post"
+  body_lacks "First comment" "GET /comments after deleting the post"
+  echo "ok  deleting a post deletes its comments"
+}
+
 rm -rf "$app_dir"
 
 step "Generating app (db: $db) in $app_dir"
@@ -243,6 +421,7 @@ else
   # JSON API resources (--api); see smoke_test_json_api below
   cli gen resource memos title:string body:text pinned:bool rating:int --api
   cli gen resource readings value:float count:int --api
+  generate_optional_and_relations
 fi
 cli gen page about
 if [ "$db" != none ]; then
@@ -572,6 +751,7 @@ grep -i "^set-cookie: _session=" "$work/logout.headers" | grep -q "Max-Age=0" ||
 echo "ok  logout clears the session cookie"
 
 smoke_test_json_api
+smoke_test_optional_and_relations
 
 # -----------------------------------------------------------------------------
 # Pagination (#22): /posts and /api/memos list one page at a time. Runs after
@@ -584,19 +764,7 @@ count_matches() {
   { grep -oF -- "$1" "$work/body.html" || true; } | wc -l | tr -d ' '
 }
 
-# body_has <text> <what> / body_lacks <text> <what>
-body_has() {
-  grep -qF -- "$1" "$work/body.html" || {
-    cat "$work/body.html" >&2
-    fail "$2: response body lacks $1"
-  }
-}
-body_lacks() {
-  if grep -qF -- "$1" "$work/body.html"; then
-    cat "$work/body.html" >&2
-    fail "$2: response body has $1"
-  fi
-}
+# body_has and body_lacks are defined with the optional(T) checks above
 
 # expect_count <want> <text> <what>
 expect_count() {
