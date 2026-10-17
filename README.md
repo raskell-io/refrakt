@@ -48,27 +48,29 @@ Light enters a prism, structure emerges. Refrakt takes the Gleam ecosystem — [
 
 ## Quick Start
 
+Refrakt is two packages: the `refrakt` runtime library your app depends
+on, and the `refrakt_cli` code generator, which apps list as a
+dev-dependency. The generator runs from inside a Gleam project, so the
+first app is bootstrapped from a throwaway one:
+
 ```bash
-# Add refrakt to a Gleam project (or use it standalone)
-gleam add refrakt
+# Create a new project with SQLite (or --db postgres, or no database)
+gleam new refrakt_bootstrap && cd refrakt_bootstrap
+gleam add --dev refrakt_cli
+gleam run -m refrakt_cli -- new ../my_app --db sqlite
+cd ../my_app && rm -rf ../refrakt_bootstrap
 
-# Create a new project with PostgreSQL
-gleam run -m refrakt/cli -- new my_app --db postgres
-cd my_app
-
-# Generate a full CRUD resource
-gleam run -m refrakt/cli -- gen resource posts title:string body:text published:bool
+# Generate a full CRUD resource and create its table
+gleam run -m refrakt_cli -- gen resource posts title:string body:text published:bool
+gleam run -m refrakt_cli -- migrate
 
 # Start the server
 gleam run
 # → http://localhost:4000/posts
 ```
 
-Or with SQLite — no external database needed:
-
-```bash
-gleam run -m refrakt/cli -- new my_app --db sqlite
-```
+Tip: `alias refrakt='gleam run -m refrakt_cli --'` turns every command
+below into `refrakt gen ...`.
 
 <br>
 
@@ -126,6 +128,9 @@ Plain Gleam pattern matching. No DSL, no macros. A new developer reads this file
 
 ## Commands
 
+Run inside a generated app as `gleam run -m refrakt_cli -- <command>`
+(or `refrakt <command>` with the alias above).
+
 | Command | Description |
 |---------|-------------|
 | `refrakt new <name>` | Create a new project (`--db postgres`, `--db sqlite`) |
@@ -179,22 +184,27 @@ Plain Gleam pattern matching. No DSL, no macros. A new developer reads this file
 - [x] Dev file watcher (auto-rebuild on `src/` changes via fswatch)
 - [x] Auto-format all generated code
 - [x] Route table printer
-- [x] 33 tests (22 unit + 11 generator integration)
+- [x] 49 package tests (30 library + 19 CLI) and CI that generates, builds, tests and boots apps for every database option
 - [x] 17 documentation files
-- [x] 2 example apps (blog + tasks)
+- [x] 2 example apps (blog + tasks), regenerated with the current CLI
 
 <br>
 
 ## Examples
 
+Both examples were generated with these commands (`refrakt` is the alias
+from Quick Start) and depend on the in-repo packages through path
+dependencies.
+
 ### Blog (PostgreSQL)
 
 ```bash
-gleam run -m refrakt/cli -- new blog --db postgres
+refrakt new blog --db postgres
 cd blog
-gleam run -m refrakt/cli -- gen resource posts title:string body:text published:bool
-gleam run -m refrakt/cli -- gen auth
-gleam run -m refrakt/cli -- gen page about
+refrakt gen resource posts title:string body:text published:bool
+refrakt gen auth
+refrakt gen page about
+refrakt gen island counter
 ```
 
 See [`examples/blog/`](examples/blog/) for the complete app.
@@ -202,9 +212,9 @@ See [`examples/blog/`](examples/blog/) for the complete app.
 ### Tasks (SQLite)
 
 ```bash
-gleam run -m refrakt/cli -- new tasks_app --db sqlite
+refrakt new tasks_app --db sqlite
 cd tasks_app
-gleam run -m refrakt/cli -- gen resource tasks title:string completed:bool
+refrakt gen resource tasks title:string completed:bool
 ```
 
 See [`examples/tasks_app/`](examples/tasks_app/) for the complete app.
@@ -235,7 +245,7 @@ See [`examples/tasks_app/`](examples/tasks_app/) for the complete app.
 
 ## Library
 
-Generated apps depend on the small `refrakt` library. Everything else is plain Wisp, Lustre and Mist.
+Generated apps depend on the small [`refrakt`](packages/refrakt) library at runtime; the [`refrakt_cli`](packages/refrakt_cli) generator is only a dev-dependency. Everything else is plain Wisp, Lustre and Mist.
 
 | Module | What it does |
 |--------|--------------|
@@ -279,10 +289,21 @@ cd refrakt
 # Install toolchain
 mise install   # Gleam 1.19, Erlang 27, rebar3
 
-# Build and test
-gleam build
-gleam test     # 33 tests
+# Two packages: the library and the CLI
+cd packages/refrakt && gleam build && gleam test       # 30 tests
+cd ../refrakt_cli && gleam build && gleam test         # 19 tests
+
+# Or both at once, plus a generated app end to end
+cd ../..
+mise run test
+mise exec -- .github/scripts/test-generated-app.sh sqlite
 ```
+
+| Path | Package |
+|------|---------|
+| [`packages/refrakt`](packages/refrakt) | `refrakt` — runtime library, published to Hex |
+| [`packages/refrakt_cli`](packages/refrakt_cli) | `refrakt_cli` — code generator, published to Hex |
+| [`examples/`](examples) | Blog (Postgres) and tasks (SQLite) apps generated with the CLI |
 
 <br>
 

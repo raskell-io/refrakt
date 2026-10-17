@@ -34,8 +34,9 @@ openssl rand -hex 64
 
 ### PostgreSQL
 
-Set `DATABASE_URL` or modify `repo.gleam` to read your connection
-string from the environment.
+Set `DATABASE_URL`; the generated `repo.gleam` reads the connection
+string from it (for example
+`postgres://user:password@db.internal:5432/my_app`).
 
 ## Deploy with Vela
 

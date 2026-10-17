@@ -20,7 +20,9 @@ prism does. Free on Hex, distinctive, no ecosystem collisions.
 
 ## Commands
 
-The CLI is `refrakt`. It wraps `gleam` — it does not replace it.
+The CLI is the `refrakt_cli` package, run as
+`gleam run -m refrakt_cli -- <command>` (written `refrakt <command>`
+below). It wraps `gleam` — it does not replace it.
 `gleam build`, `gleam test`, `gleam run` still work.
 Refrakt adds the conventions on top.
 
@@ -991,19 +993,23 @@ Gleam-in-Gleam is preferred for dogfooding and community trust.
 
 ```toml
 [dependencies]
-gleam_stdlib = ">= 0.44.0 and < 2.0.0"
-gleam_erlang = ">= 0.34.0 and < 2.0.0"
-gleam_http = ">= 4.3.0 and < 5.0.0"
-mist = ">= 5.0.0 and < 6.0.0"
-wisp = ">= 2.2.0 and < 3.0.0"
-lustre = ">= 5.6.0 and < 6.0.0"
+gleam_stdlib = ">= 0.70.0 and < 2.0.0"
+gleam_erlang = ">= 1.3.0 and < 2.0.0"
+gleam_http = ">= 4.5.0 and < 5.0.0"
+envoy = ">= 1.2.0 and < 2.0.0"
+mist = ">= 6.0.0 and < 7.0.0"
+wisp = ">= 2.2.2 and < 3.0.0"
+lustre = ">= 5.7.0 and < 6.0.0"
+gleam_json = ">= 3.1.0 and < 4.0.0"
+refrakt = ">= 0.4.0 and < 1.0.0"
 # if --db postgres:
 pog = ">= 4.1.0 and < 5.0.0"
 # if --db sqlite:
-sqlight = ">= 1.0.0 and < 2.0.0"
+sqlight = ">= 1.2.0 and < 2.0.0"
 
 [dev-dependencies]
-gleeunit = ">= 1.0.0 and < 2.0.0"
+gleeunit = ">= 1.11.0 and < 2.0.0"
+refrakt_cli = ">= 0.4.0 and < 1.0.0"   # the generator; never a runtime dependency
 ```
 
 ---

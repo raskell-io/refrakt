@@ -36,7 +36,7 @@ refrakt (monorepo)
 - Test helpers (request builders)
 - Dev error page
 
-**`refrakt_cli` (CLI tool)** — Installed as a binary. Generates code. Contains:
+**`refrakt_cli` (CLI tool)** — Published to Hex. A dev-dependency of generated projects, run with `gleam run -m refrakt_cli -- <command>` (docs abbreviate this as `refrakt <command>`). Never a runtime dependency, and it does not import `refrakt`. Generates code. Contains:
 - `refrakt new` — scaffold a project
 - `refrakt gen page` — handler + route
 - `refrakt gen resource` — full CRUD (handler, views, form, domain type, repo, migration)
@@ -131,14 +131,21 @@ Raw SQL via Pog (Postgres) or Sqlight (SQLite). Typed decoders. No ORM.
 ### Common Commands
 
 ```bash
-# Development
-gleam build
+# Development (inside packages/refrakt or packages/refrakt_cli)
+gleam build --warnings-as-errors
 gleam test
-gleam format --check
+gleam format --check src test
+
+# Or across both packages from the repo root
+mise run build
+mise run test
 
 # Run the CLI locally
-gleam run -m refrakt_cli -- new my_app
-gleam run -m refrakt_cli -- gen resource posts title:string body:text
+cd packages/refrakt_cli
+gleam run -m refrakt_cli -- new /tmp/my_app --db sqlite
+
+# Generate, build, test and boot an app against the working copy
+mise exec -- .github/scripts/test-generated-app.sh sqlite
 
 # Docs
 gleam docs build
@@ -154,5 +161,7 @@ gleam docs build
 | `packages/refrakt/src/refrakt/migrate.gleam` | Migration runner |
 | `packages/refrakt/src/refrakt/testing.gleam` | Test helpers |
 | `packages/refrakt_cli/src/refrakt_cli.gleam` | CLI entry point |
-| `packages/refrakt_cli/src/refrakt_cli/gen/` | Code generators |
+| `packages/refrakt_cli/src/refrakt_cli/gen.gleam` | Code generators |
+| `packages/refrakt_cli/src/refrakt_cli/templates.gleam` | Project templates |
+| `.github/scripts/test-generated-app.sh` | End-to-end check of generated apps (CI) |
 | `docs/GOLDEN_PATH.md` | Golden path specification |
