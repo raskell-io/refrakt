@@ -251,6 +251,7 @@ Generated apps depend on the small [`refrakt`](packages/refrakt) library at runt
 |--------|--------------|
 | `refrakt/validate` | Composable validators that return `List(#(String, String))` errors |
 | `refrakt/flash` | Flash messages on signed cookies |
+| `refrakt/csrf` | Rejects cross-site form posts (`Sec-Fetch-Site`, `Origin`, `Referer`) |
 | `refrakt/migrate` | Runs SQL migration files and tracks them in a `_migrations` table |
 | `refrakt/testing` | Request builders for handler tests |
 | `refrakt/dev_error` | Development error page |

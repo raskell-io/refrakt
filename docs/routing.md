@@ -114,6 +114,7 @@ fn middleware(
   let req = wisp.method_override(req)     // PUT/DELETE via _method
   use <- wisp.log_request(req)            // log method + path
   use <- rescue_crashes(req, ctx)         // catch panics, return 500
+  use req <- csrf.protect(req)            // 403 for cross-site posts
   use <- wisp.serve_static(req,           // serve priv/static/*
     under: "/static",
     from: priv_static(),
@@ -139,6 +140,53 @@ error, a stack trace and the request headers. With `APP_ENV=test` or
 `APP_ENV=prod` the crash is logged and the visitor gets a plain
 `500 Internal server error`, so internals never leak in production.
 
+### CSRF protection
+
+`csrf.protect` (from `refrakt/csrf`) stops cross-site request forgery:
+another site's page submitting a form to your app with your visitor's
+cookies. GET, HEAD, OPTIONS and TRACE requests pass untouched (keep
+them free of side effects). For POST, PUT, PATCH and DELETE it asks the
+browser where the request came from:
+
+1. `Sec-Fetch-Site`: `same-origin` passes; `cross-site` and
+   `same-site` (a sibling subdomain) get `403 Forbidden`. All current
+   browsers send it over HTTPS and to localhost.
+2. Otherwise `Origin`, then `Referer`: they must name the host and port
+   in the request's `Host` header, or the request gets 403.
+3. A request with none of these headers did not come from a browser
+   page (curl, a webhook, a mobile app) or from a very old browser. It
+   goes ahead with its `cookie` header removed, so it can never act as
+   a signed-in user.
+
+Browsers set these headers themselves and pages cannot forge them, so
+your forms need no hidden token field and handlers need no CSRF code.
+It is the approach of Go's `http.CrossOriginProtection` and of Wisp's
+`csrf_known_header_protection` (which `refrakt/csrf` extends with
+`Sec-Fetch-Site` and a 403 instead of a 400). Session cookies are also
+`SameSite=Lax`, a second layer: browsers leave them off other sites'
+form posts.
+
+Limits to know about:
+
+- **Reverse proxies** must pass the original `Host` header (nginx:
+  `proxy_set_header Host $host;`; Caddy and Fly.io do by default).
+  Browsers on plain HTTP send no `Sec-Fetch-Site`, and the `Origin`
+  check compares against `Host`.
+- **Cross-origin APIs:** a JSON API meant to be called from other sites'
+  JavaScript (with `refrakt/cors`) would get 403s. Match those paths
+  before `csrf.protect` in the middleware, and authenticate them with a
+  token header rather than cookies. Server-to-server and curl clients
+  send no `Origin` and are not affected.
+- **GET with side effects** is never checked: a link or an image on
+  another site can trigger it. Use POST (or `_method`) for anything
+  that changes state.
+
+In tests, `wisp/simulate.browser_request` sends a matching `Origin`,
+and `simulate.header(req, "origin", "https://evil.example")` simulates
+a cross-site post. The generated `test/<app>/router_test.gleam` checks
+both. For `refrakt/testing` requests use `testing.same_origin` and
+`testing.cross_site`.
+
 Add custom middleware by inserting `use` calls:
 
 ```gleam
@@ -150,6 +198,7 @@ fn middleware(
   let req = wisp.method_override(req)
   use <- wisp.log_request(req)
   use <- rescue_crashes(req, ctx)
+  use req <- csrf.protect(req)
   use <- wisp.serve_static(req, under: "/static", from: priv_static())
   use <- my_custom_middleware(req)          // your middleware
   next(req)

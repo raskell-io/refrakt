@@ -19,12 +19,29 @@ Set these in production:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `PORT` | No | `4000` | HTTP port |
-| `SECRET_KEY_BASE` | **Yes** | dev fallback | Cookie signing key (64+ chars) |
+| `SECRET_KEY_BASE` | **Yes** | dev fallback (not in prod) | Cookie signing key (64+ bytes) |
 | `APP_ENV` | **Yes** (set to `prod`) | `dev` | `dev`, `test`, or `prod` |
 
 Leaving `APP_ENV` unset means `dev`, which shows the detailed error page
 (error, stack trace, request headers) to anyone who triggers a crash.
 Always set `APP_ENV=prod` in production; crashes then return a plain 500.
+When `APP_ENV` is unset the app logs a warning at startup.
+
+With `APP_ENV=prod` the app refuses to start, printing why and exiting
+with status 1, when `SECRET_KEY_BASE` is
+
+- not set,
+- the development key from `src/<app>/config.gleam` (it is in your
+  source code, so it is not secret), or
+- shorter than 64 bytes.
+
+### Reverse proxies
+
+The CSRF check compares the browser's `Origin` with the `Host` header,
+so a proxy in front of the app must pass the original `Host` (nginx:
+`proxy_set_header Host $host;`; Caddy and Fly.io do this already).
+Otherwise form posts from browsers without `Sec-Fetch-Site` get
+`403 Forbidden`. See [Routing](routing.md#csrf-protection).
 
 ### Generate a secret key
 
@@ -132,8 +149,9 @@ sqlite3 /path/to/my_app.db < src/my_app/data/migrations/001_create_posts.sql
 
 ## Production checklist
 
-- [ ] `SECRET_KEY_BASE` set to a random 64+ character string
-- [ ] `APP_ENV=prod` set (otherwise crashes show the dev error page)
+- [ ] `SECRET_KEY_BASE` set to a random 64+ byte string (the app refuses to start in prod otherwise)
+- [ ] `APP_ENV=prod` set (otherwise crashes show the dev error page and session cookies are not forced `Secure`)
+- [ ] Served over HTTPS, with the proxy passing the original `Host` header
 - [ ] Database migrations run
 - [ ] Static assets accessible at `/static/`
 - [ ] Health check endpoint (add `GET /health` route)

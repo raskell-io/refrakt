@@ -23,19 +23,21 @@ produces code for whichever one your project uses:
 A project created without `--db` has nowhere to store users, so
 `gen auth` prints an error and generates nothing.
 
-This creates 9 files:
+This creates 11 files:
 
 | File | Purpose |
 |------|---------|
 | `domain/user.gleam` | User type |
-| `domain/auth.gleam` | Password hashing and verification |
+| `domain/auth.gleam` | Password hashing, verification and login checks |
 | `data/user_repo.gleam` | User database queries |
 | `data/migrations/NNN_create_users.sql` | Users table |
 | `web/auth_handler.gleam` | Login, register, logout handlers |
-| `web/auth_views.gleam` | Login and register forms |
+| `web/auth_views.gleam` | Login and register forms, logout button |
 | `web/forms/auth_form.gleam` | Credential validation |
+| `web/session.gleam` | Session cookie: sign in, sign out, read |
 | `web/middleware/auth.gleam` | Session middleware |
-| `test/.../auth_handler_test.gleam` | Password hashing tests |
+| `test/.../auth_handler_test.gleam` | Password hashing and login tests |
+| `test/.../session_test.gleam` | Session cookie tests |
 
 It also adds the `argus` package (Argon2 password hashing) to
 `gleam.toml`.
@@ -70,18 +72,75 @@ sqlite3 my_app.db < src/my_app/data/migrations/NNN_create_users.sql
 
 ## How sessions work
 
-Sessions use signed cookies. When a user logs in:
+`web/session.gleam` keeps the login in a `_session` cookie. When a
+user logs in or registers:
 
-1. The handler verifies the password
-2. Sets a `_user_id` cookie (signed, 7-day expiry)
+1. The handler checks the password (`auth.authenticate`)
+2. `session.sign_in` sets the `_session` cookie: the user id in a
+   token from `refrakt/token`, signed with `SECRET_KEY_BASE` and
+   stamped with the time it was issued
 3. Redirects to `/`
 
 When checking auth:
 
-1. The middleware reads the `_user_id` cookie
-2. Verifies the signature
+1. The middleware reads the `_session` cookie (`session.user_id`)
+2. Verifies the signature and that the token is at most 7 days old
 3. Looks up the user in the database
 4. Passes the user to the handler or redirects to `/login`
+
+Logging out (`POST /logout`) tells the browser to delete the cookie.
+Put `auth_views.logout_form()` in your layout for a "Log Out" button;
+logout is a POST so other sites cannot log your users out with a link.
+
+### Cookie attributes
+
+| Attribute | Value | Why |
+|-----------|-------|-----|
+| `Max-Age` | 604800 (7 days) | The browser drops the cookie after a week |
+| `HttpOnly` | always | Page scripts (and XSS) cannot read it |
+| `SameSite` | `Lax` | Other sites' form posts and scripts never carry it |
+| `Secure` | with `APP_ENV=prod` | Only sent over HTTPS, even when a proxy talks plain HTTP to the app |
+| `Path` | `/` | The whole app |
+
+In development `Secure` follows the request scheme, because Safari
+refuses `Secure` cookies on `http://localhost`.
+
+The 7-day limit is also checked on the server: the token records when
+it was issued, so a copied cookie stops working after a week even if
+someone keeps sending it. Change `max_age` in `web/session.gleam` to
+change the session length.
+
+### Why the session is a signed user id
+
+The cookie holds the user id, not a random id pointing at a sessions
+table. That keeps `gen auth` free of extra tables and queries, at a
+cost: a session cannot be revoked on the server before it expires.
+Logging out deletes the cookie in that browser, but a copy taken
+earlier stays valid until its 7 days are up. Rotating
+`SECRET_KEY_BASE` signs everyone out at once. If you need "log out
+everywhere" or revocation on password change, add a `sessions` table
+with random ids and store that id in the token instead.
+
+## Timing and account enumeration
+
+Argon2 is slow on purpose, so a login that skipped it for unknown
+emails would answer measurably faster than one with a wrong password,
+telling an attacker which emails have accounts. `auth.authenticate`
+checks the password against `auth.dummy_hash` (a real Argon2id hash
+with the same settings) when there is no such user, so both cases take
+the same time and return the same "Invalid email or password" error.
+If you change the Argon2 settings, replace `dummy_hash` with a hash
+made with the new ones.
+
+Registration still says "Could not create account" for a taken email;
+change that message (and send a "you already have an account" email
+instead) if enumeration through sign-up matters for your app.
+
+## CSRF protection
+
+Login, registration and logout are form posts, so they are covered by
+the CSRF check in the router middleware: a post from another site gets
+`403 Forbidden`. See [Routing](routing.md#csrf-protection).
 
 ## Protecting routes
 
@@ -186,7 +245,7 @@ fn validate_email_format(errors, email) {
 Since auth is generated code (not a library), you can:
 
 - Add fields to the User type (name, role, avatar)
-- Change the session duration
+- Change the session duration (`max_age` in `web/session.gleam`)
 - Add email verification
 - Add password reset
 - Add OAuth (Google, GitHub)

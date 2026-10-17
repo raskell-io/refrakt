@@ -84,6 +84,10 @@ pub fn run(path: String, flags: List(String)) {
       path <> "/test/" <> name <> "/web/home_handler_test.gleam",
       templates.home_handler_test(name),
     ),
+    #(
+      path <> "/test/" <> name <> "/router_test.gleam",
+      templates.router_test(name, db),
+    ),
   ]
 
   // Add repo module if DB is selected
@@ -142,6 +146,7 @@ pub fn run(path: String, flags: List(String)) {
   io.println("      js/app.js")
   io.println("    test/")
   io.println("      " <> name <> "_test.gleam")
+  io.println("      " <> name <> "/router_test.gleam")
   io.println("      " <> name <> "/web/")
   io.println("        home_handler_test.gleam")
   io.println("")

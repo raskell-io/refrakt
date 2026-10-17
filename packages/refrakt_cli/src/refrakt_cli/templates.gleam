@@ -32,7 +32,7 @@ mist = \">= 6.0.0 and < 7.0.0\"
 wisp = \">= 2.2.2 and < 3.0.0\"
 lustre = \">= 5.7.0 and < 6.0.0\"
 gleam_json = \">= 3.1.0 and < 4.0.0\"
-refrakt = \">= 0.4.0 and < 1.0.0\"" <> db_dep <> "
+refrakt = \">= 0.5.0 and < 1.0.0\"" <> db_dep <> "
 
 [dev-dependencies]
 gleeunit = \">= 1.11.0 and < 2.0.0\"
@@ -92,7 +92,8 @@ pub fn main_module(name: String, db: DbChoice) -> String {
     NoDb -> "\n  let ctx = context.Context(config: cfg)"
   }
 
-  "import gleam/erlang/process
+  "import envoy
+import gleam/erlang/process
 import gleam/io
 import mist
 import " <> name <> "/config
@@ -103,8 +104,15 @@ import wisp/wisp_mist" <> db_import <> "
 
 pub fn main() {
   wisp.configure_logger()
+  warn_if_app_env_unset()
 
-  let cfg = config.load()" <> db_ctx <> "
+  let cfg = case config.load() {
+    Ok(cfg) -> cfg
+    Error(error) -> {
+      io.println_error(\"Refusing to start: \" <> config.describe_error(error))
+      halt(1)
+    }
+  }" <> db_ctx <> "
 
   let assert Ok(_) =
     wisp_mist.handler(router.handle_request(_, ctx), cfg.secret_key_base)
@@ -115,13 +123,33 @@ pub fn main() {
   io.println(\"Listening on http://localhost:\" <> cfg.port_string)
   process.sleep_forever()
 }
+
+/// Without APP_ENV the app runs in development mode, which shows stack
+/// traces and request details when a handler crashes. That is right for
+/// `refrakt dev` (which sets APP_ENV=dev) but not for a deployment.
+fn warn_if_app_env_unset() -> Nil {
+  case envoy.get(\"APP_ENV\") {
+    Ok(_) -> Nil
+    Error(_) ->
+      wisp.log_warning(
+        \"APP_ENV is not set, so this app runs in development mode and shows \"
+        <> \"stack traces and request details on errors. Set APP_ENV=prod in \"
+        <> \"production.\",
+      )
+  }
+}
+
+/// Stop the Erlang VM with an exit status.
+@external(erlang, \"erlang\", \"halt\")
+fn halt(status: Int) -> a
 "
 }
 
-pub fn config_module(_name: String) -> String {
+pub fn config_module(name: String) -> String {
   "import envoy
 import gleam/int
 import gleam/result
+import gleam/string
 
 pub type Config {
   Config(
@@ -138,17 +166,25 @@ pub type Env {
   Prod
 }
 
-pub fn load() -> Config {
+/// Why `load` refused the environment.
+pub type ConfigError {
+  /// APP_ENV=prod, but SECRET_KEY_BASE is not set.
+  MissingSecretKeyBase
+  /// APP_ENV=prod, but SECRET_KEY_BASE is the development key below.
+  DevelopmentSecretKeyBase
+  /// SECRET_KEY_BASE is shorter than 64 bytes.
+  ShortSecretKeyBase(bytes: Int)
+}
+
+/// Signs cookies in development and test when SECRET_KEY_BASE is unset.
+/// It is in your source code, so production refuses to use it.
+const development_secret_key_base = \"dev-secret-key-base-that-is-at-least-64-bytes-long-for-security!!\"
+
+pub fn load() -> Result(Config, ConfigError) {
   let port =
     envoy.get(\"PORT\")
     |> result.try(int.parse)
     |> result.unwrap(4000)
-
-  let secret_key_base =
-    envoy.get(\"SECRET_KEY_BASE\")
-    |> result.unwrap(
-      \"dev-secret-key-base-that-is-at-least-64-bytes-long-for-security!!\",
-    )
 
   let env = case envoy.get(\"APP_ENV\") {
     Ok(\"prod\") -> Prod
@@ -156,12 +192,48 @@ pub fn load() -> Config {
     _ -> Dev
   }
 
-  Config(
+  use secret_key_base <- result.try(load_secret_key_base(env))
+
+  Ok(Config(
     port: port,
     port_string: int.to_string(port),
     secret_key_base: secret_key_base,
     env: env,
-  )
+  ))
+}
+
+/// Production needs its own secret of at least 64 bytes; development and
+/// test fall back to the development key.
+fn load_secret_key_base(env: Env) -> Result(String, ConfigError) {
+  case envoy.get(\"SECRET_KEY_BASE\"), env {
+    Error(_), Prod -> Error(MissingSecretKeyBase)
+    Error(_), _ -> Ok(development_secret_key_base)
+    Ok(key), Prod if key == development_secret_key_base ->
+      Error(DevelopmentSecretKeyBase)
+    Ok(key), _ ->
+      case string.byte_size(key) {
+        bytes if bytes < 64 -> Error(ShortSecretKeyBase(bytes))
+        _ -> Ok(key)
+      }
+  }
+}
+
+pub fn describe_error(error: ConfigError) -> String {
+  let generate = \" Generate one with `openssl rand -hex 64`.\"
+  case error {
+    MissingSecretKeyBase ->
+      \"SECRET_KEY_BASE is not set. Production needs its own secret key.\"
+      <> generate
+    DevelopmentSecretKeyBase ->
+      \"SECRET_KEY_BASE is the development key from src/" <> name <> "/config.gleam, \"
+      <> \"which is not secret.\"
+      <> generate
+    ShortSecretKeyBase(bytes) ->
+      \"SECRET_KEY_BASE is \"
+      <> int.to_string(bytes)
+      <> \" bytes long; it must be at least 64 bytes.\"
+      <> generate
+  }
 }
 "
 }
@@ -192,6 +264,7 @@ import " <> name <> "/config
 import " <> name <> "/context.{type Context}
 import " <> name <> "/web/error_handler
 import " <> name <> "/web/home_handler
+import refrakt/csrf
 import refrakt/dev_error
 import wisp.{type Request, type Response}
 
@@ -212,6 +285,8 @@ fn middleware(
   let req = wisp.method_override(req)
   use <- wisp.log_request(req)
   use <- rescue_crashes(req, ctx)
+  // Forms posted from another site get 403 Forbidden; see refrakt/csrf.
+  use req <- csrf.protect(req)
   use <- wisp.serve_static(req, under: \"/static\", from: priv_static())
   next(req)
 }
@@ -552,6 +627,71 @@ pub fn placeholder_test() {
   |> should.equal(2)
 }
 "
+}
+
+pub fn router_test(name: String, db: DbChoice) -> String {
+  let #(context_imports, context_value) = test_context(db)
+
+  "import gleam/http
+import gleeunit/should
+import " <> name <> "/config
+import " <> name <> "/context.{type Context}
+import " <> name <> "/router" <> context_imports <> "
+import wisp/simulate
+
+pub fn home_page_test() {
+  let response =
+    simulate.request(http.Get, \"/\")
+    |> router.handle_request(test_context())
+
+  response.status
+  |> should.equal(200)
+}
+
+pub fn cross_site_post_is_rejected_test() {
+  let response =
+    simulate.request(http.Post, \"/\")
+    |> simulate.header(\"origin\", \"https://evil.example\")
+    |> router.handle_request(test_context())
+
+  response.status
+  |> should.equal(403)
+}
+
+pub fn same_origin_post_passes_csrf_check_test() {
+  // browser_request sends an Origin header matching the host, as a
+  // browser does when it submits one of this app's forms. No route
+  // handles POST /, so the request gets past the CSRF check to a 404.
+  let response =
+    simulate.browser_request(http.Post, \"/\")
+    |> router.handle_request(test_context())
+
+  response.status
+  |> should.equal(404)
+}
+
+fn test_context() -> Context {
+  let assert Ok(cfg) = config.load()
+  " <> context_value <> "
+}
+"
+}
+
+/// Imports and the `Context` expression a generated test uses to call the
+/// router. The database is never opened: the tests only take paths that
+/// do not reach a repo.
+pub fn test_context(db: DbChoice) -> #(String, String) {
+  case db {
+    Postgres -> #(
+      "\nimport gleam/erlang/process\nimport pog",
+      "context.Context(
+    config: cfg,
+    db: pog.named_connection(process.new_name(prefix: \"test_db\")),
+  )",
+    )
+    Sqlite -> #("", "context.Context(config: cfg, db_path: \":memory:\")")
+    NoDb -> #("", "context.Context(config: cfg)")
+  }
 }
 
 // =============================================================================

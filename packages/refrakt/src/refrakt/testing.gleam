@@ -65,6 +65,39 @@ pub fn with_header(
   request.set_header(req, name, value)
 }
 
+/// Mark a test request as sent by a page of this app, the way a browser
+/// submits a form: sets the `host` header (from the request's host, if
+/// it is missing) and a matching `origin` header. Unsafe requests need
+/// these to get past `refrakt/csrf.protect` with their cookies.
+pub fn same_origin(req: request.Request(body)) -> request.Request(body) {
+  let host = host_header(req)
+  req
+  |> request.set_header("host", host)
+  |> request.set_header(
+    "origin",
+    http.scheme_to_string(req.scheme) <> "://" <> host,
+  )
+}
+
+/// Mark a test request as sent by a page on another site, such as
+/// `"https://evil.example"`. `refrakt/csrf.protect` rejects it with 403
+/// unless the method is safe.
+pub fn cross_site(
+  req: request.Request(body),
+  from origin: String,
+) -> request.Request(body) {
+  req
+  |> request.set_header("host", host_header(req))
+  |> request.set_header("origin", origin)
+}
+
+fn host_header(req: request.Request(body)) -> String {
+  case request.get_header(req, "host") {
+    Ok(host) -> host
+    Error(_) -> req.host
+  }
+}
+
 /// Set the body of a test request.
 pub fn with_body(
   req: request.Request(String),
