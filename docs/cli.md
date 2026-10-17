@@ -58,7 +58,9 @@ refrakt gen resource products name:string price:float in_stock:bool
 
 # Optional (nullable) fields; quote them, ( ) is shell syntax
 refrakt gen resource events title:string 'starts_on:optional(date)' 'capacity:optional(int)'
-refrakt gen resource comments author:string body:text post_id:int
+
+# A child of posts: post_id foreign key, select of posts, comments on the post's page
+refrakt gen resource comments author:string body:text --belongs-to posts
 
 # JSON API mode (no views/forms, routes under /api/)
 refrakt gen resource posts title:string body:text --api
@@ -86,9 +88,20 @@ refrakt gen resource posts title:string body:text --api
 **Patches:** `router.gleam` with RESTful routes (HTML: 7 routes,
 API: 5 routes under `/api/` prefix).
 
+**`--belongs-to <parent>`** (also `--belongs-to=<parent>`): the parent
+resource must already exist. Adds a `<parent>_id` field with a foreign
+key (`ON DELETE CASCADE`), `list_for_<parent>` (and, for HTML,
+`<parent>_options`) in the repo, a check that the parent exists (422
+otherwise), a select of parents in the form, and
+`web/components/<child>_list.gleam`, which the CLI renders on the
+parent's show page when the parent's handler is as generated (it
+prints the lines to add otherwise). Routes stay flat. Details in
+[Relations](database.md#relations---belongs-to).
+
 **Errors.** An unknown field type (`price:money`), a spec without a
-type, an invalid or repeated field name, or an unknown option is
-reported, and nothing is written.
+type, an invalid or repeated field name, an unknown option, or a
+`--belongs-to` parent that does not exist is reported, and nothing is
+written.
 
 **API responses.** Every response, errors included, is JSON:
 

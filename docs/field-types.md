@@ -134,6 +134,12 @@ submitted value is a 422 ("... must be yes or no"). In JSON it is
 | `datetime` | `""` |
 | `optional(T)` | `None` |
 
+## Foreign keys (`--belongs-to`)
+
+`--belongs-to posts` adds a `post_id` field of type `int` with a
+foreign key to `posts(id)`. See
+[Relations](database.md#relations---belongs-to).
+
 ## All generated columns
 
 Every migration includes these automatic columns in addition to

@@ -6,7 +6,7 @@
 #   2. point the app at the in-repo library and CLI (path dependencies),
 #      so the check covers HEAD rather than whatever is on Hex
 #   3. `gen resource posts ...`, `gen resource memos ... --api`, resources
-#      with optional(T) fields, `gen page
+#      with optional(T) fields and a `--belongs-to posts` child, `gen page
 #      about`, and `gen auth` when the app has a database, all run through
 #      the app's own dev-dependency
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`
@@ -14,8 +14,8 @@
 #      multi-statement migration and a failing one that must roll back),
 #      check that APP_ENV=prod refuses a missing, development or short
 #      SECRET_KEY_BASE, boot the app and smoke-test /posts, CSRF
-#      rejection, the /api/memos JSON API, optional fields, and the
-#      register/login/logout flow with curl
+#      rejection, the /api/memos JSON API, optional fields and relations,
+#      and the register/login/logout flow with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -200,29 +200,40 @@ SQL
 }
 
 # -----------------------------------------------------------------------------
-# optional(T) fields (#35)
+# optional(T) fields (#35) and --belongs-to relations (#23)
 #
-# generate_optional_fields runs inside the app directory, after
+# generate_optional_and_relations runs inside the app directory, after
 # `gen resource posts`. It generates
 #   - products: optional fields of every kind (HTML form)
 #   - gadgets: optional fields in an --api resource
-# and checks that an unknown field type is refused without writing files. smoke_test_optional_fields exercises them
+#   - comments: `--belongs-to posts`, which patches the post's show page
+# and checks that an unknown field type and a missing parent are refused
+# without writing files. smoke_test_optional_and_relations exercises them
 # against the running app.
 # -----------------------------------------------------------------------------
 
-generate_optional_fields() {
+generate_optional_and_relations() {
   local output
   cli gen resource products name:string 'price:optional(float)' \
     'stock:optional(int)' 'note:optional(text)' 'featured:optional(bool)' \
     'released:optional(date)'
   cli gen resource gadgets label:string 'weight:optional(float)' \
     'count:optional(int)' 'active:optional(bool)' 'code:optional(string)' --api
+  cli gen resource comments body:text --belongs-to posts
+  grep -q "comment_list.render(" src/app/web/post_handler.gleam ||
+    fail "gen resource comments --belongs-to posts did not patch the post's show handler"
 
   output="$(cli gen resource widgets 'size:optional(money)')"
   echo "$output"
   echo "$output" | grep -q "Unknown type" || fail "an unknown field type was not refused"
   [ ! -e src/app/web/widget_handler.gleam ] || fail "an unknown field type wrote files"
 
+  output="$(cli gen resource drafts body:text --belongs-to nopes)"
+  echo "$output"
+  echo "$output" | grep -q "there is no nopes resource" ||
+    fail "--belongs-to a missing resource was not refused"
+  [ ! -e src/app/web/draft_handler.gleam ] ||
+    fail "--belongs-to a missing resource wrote files"
 }
 
 # body_has <text> <what> / body_lacks <text> <what>: check the last response
@@ -245,8 +256,8 @@ location() {
   grep -i "^location:" "$work/headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//'
 }
 
-smoke_test_optional_fields() {
-  local product_path value
+smoke_test_optional_and_relations() {
+  local product_path post_path post_id comment_path value
 
   step "Smoke-testing optional fields (/products)"
   expect 303 "$(status POST /products -D "$work/headers" \
@@ -319,6 +330,44 @@ smoke_test_optional_fields() {
   expect 400 "$(api POST /api/gadgets '{"label":"Bad","count":"many"}')" \
     "POST /api/gadgets with a count that is not a number"
 
+  step "Smoke-testing --belongs-to (/posts and /comments)"
+  expect 303 "$(status POST /posts -D "$work/headers" \
+    --data-urlencode "title=Parent post" --data-urlencode "body=Has comments")" \
+    "POST /posts (parent)"
+  post_path="$(location)"
+  post_id="${post_path##*/}"
+  [ -n "$post_id" ] || fail "POST /posts did not redirect to the post"
+  expect 200 "$(status GET "/comments/new?post_id=$post_id")" \
+    "GET /comments/new?post_id=$post_id"
+  body_has "Parent post" "GET /comments/new (the select offers the post)"
+  body_has "<option selected value=\"$post_id\">" \
+    "GET /comments/new?post_id=$post_id preselects the post"
+
+  expect 303 "$(status POST /comments -D "$work/headers" \
+    --data-urlencode "body=First comment" --data-urlencode "post_id=$post_id")" \
+    "POST /comments for $post_path"
+  comment_path="$(location)"
+  expect 200 "$(status GET "$comment_path")" "GET $comment_path"
+  body_has "href=\"$post_path\"" "GET $comment_path links to its post"
+  expect 422 "$(status POST /comments --data-urlencode "body=Lost" \
+    --data-urlencode "post_id=999999")" "POST /comments for a missing post"
+  body_has "Post does not exist" "POST /comments for a missing post"
+  expect 422 "$(status POST /comments --data-urlencode "body=No post")" \
+    "POST /comments without a post"
+  expect 422 "$(status POST "$comment_path?_method=PUT" --data-urlencode "body=Moved" \
+    --data-urlencode "post_id=999999")" "PUT $comment_path to a missing post"
+
+  expect 200 "$(status GET "$post_path")" "GET $post_path"
+  body_has "First comment" "GET $post_path lists its comments"
+  body_has "href=\"$comment_path\"" "GET $post_path links to the comment"
+  body_has "/comments/new?post_id=$post_id" "GET $post_path links to a new comment"
+
+  # ON DELETE CASCADE: deleting the post deletes its comments
+  expect 303 "$(status POST "$post_path?_method=DELETE")" "DELETE $post_path"
+  expect 404 "$(status GET "$comment_path")" "GET $comment_path after deleting its post"
+  expect 200 "$(status GET /comments)" "GET /comments after deleting the post"
+  body_lacks "First comment" "GET /comments after deleting the post"
+  echo "ok  deleting a post deletes its comments"
 }
 
 rm -rf "$app_dir"
@@ -359,7 +408,7 @@ else
   # JSON API resources (--api); see smoke_test_json_api below
   cli gen resource memos title:string body:text pinned:bool rating:int --api
   cli gen resource readings value:float count:int --api
-  generate_optional_fields
+  generate_optional_and_relations
 fi
 cli gen page about
 if [ "$db" != none ]; then
@@ -653,6 +702,6 @@ grep -i "^set-cookie: _session=" "$work/logout.headers" | grep -q "Max-Age=0" ||
 echo "ok  logout clears the session cookie"
 
 smoke_test_json_api
-smoke_test_optional_fields
+smoke_test_optional_and_relations
 
 step "OK ($db)"

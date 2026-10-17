@@ -10,7 +10,9 @@ import gleam/string
 import refrakt_cli/format
 import refrakt_cli/project
 import refrakt_cli/templates
-import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
+import refrakt_cli/types.{
+  type DbChoice, type Relation, NoDb, Postgres, Relation, Sqlite,
+}
 import simplifile
 
 // =============================================================================
@@ -93,21 +95,17 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
       None,
     ))
     use fields <- result.try(parse_fields(raw_fields))
-    // --belongs-to adds a foreign key field to the parent
-    let fields = case belongs_to {
-      Some(parent) ->
-        list.append(fields, [#(singularize(parent) <> "_id", "int")])
-      None -> fields
-    }
-    Ok(#(fields, api_mode))
+    use relation <- result.try(load_relation(app, belongs_to))
+    use fields <- result.try(add_relation_field(fields, relation))
+    Ok(#(fields, api_mode, relation))
   }
   case parsed {
     Error(message) -> {
       io.println("Error: " <> message)
       io.println("Nothing was generated.")
     }
-    Ok(#(fields, api_mode)) ->
-      generate_resource(app, name, fields, api_mode, db)
+    Ok(#(fields, api_mode, relation)) ->
+      generate_resource(app, name, fields, api_mode, relation, db)
   }
 }
 
@@ -140,11 +138,116 @@ fn resource_args(
 const belongs_to_usage =
   "--belongs-to needs the parent resource, such as --belongs-to posts."
 
+/// Look up the parent resource of `--belongs-to`. It must have been
+/// generated (a domain type and a repo with `get`), since the child's
+/// handlers check that the parent exists.
+fn load_relation(
+  app: String,
+  belongs_to: Option(String),
+) -> Result(Option(Relation), String) {
+  case belongs_to {
+    None -> Ok(None)
+    Some(plural) -> {
+      let singular = singularize(plural)
+      let domain_path = "src/" <> app <> "/domain/" <> singular <> ".gleam"
+      let repo_path = "src/" <> app <> "/data/" <> singular <> "_repo.gleam"
+      case simplifile.read(domain_path), simplifile.read(repo_path) {
+        Ok(domain), Ok(repo) ->
+          case string.contains(repo, "pub fn get(") {
+            False ->
+              Error(
+                "--belongs-to "
+                <> plural
+                <> ": "
+                <> repo_path
+                <> " has no `get(db, id)` function, which the generated handlers use to check that the "
+                <> singular
+                <> " exists.",
+              )
+            True ->
+              Ok(
+                Some(Relation(
+                  plural: plural,
+                  singular: singular,
+                  type_name: capitalize(singular),
+                  table: singular <> "s",
+                  field: singular <> "_id",
+                  label: first_string_field(domain),
+                )),
+              )
+          }
+        _, _ ->
+          Error(
+            "--belongs-to "
+            <> plural
+            <> ": there is no "
+            <> plural
+            <> " resource ("
+            <> domain_path
+            <> " or "
+            <> repo_path
+            <> " is missing). Generate it first, for example: refrakt gen resource "
+            <> plural
+            <> " title:string",
+          )
+      }
+    }
+  }
+}
+
+/// The first `name: String` field of a generated domain type, such as
+/// `pub type Post { Post(id: Int, title: String) }` on one line or several.
+pub fn first_string_field(domain: String) -> Option(String) {
+  let fields = case string.split_once(domain, "(") {
+    Ok(#(_, after)) -> after
+    Error(_) -> ""
+  }
+  fields
+  |> string.split(",")
+  |> list.find_map(fn(field) {
+    case string.split_once(field, ":") {
+      Ok(#(name, gleam_type)) ->
+        // the last field is followed by the constructor's `)`
+        case string.trim(name), string.trim(gleam_type) {
+          "id", _ -> Error(Nil)
+          name, "String" -> Ok(name)
+          name, "String)" <> _ -> Ok(name)
+          _, _ -> Error(Nil)
+        }
+      Error(_) -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+/// Append the foreign key field of `--belongs-to`.
+fn add_relation_field(
+  fields: List(#(String, String)),
+  relation: Option(Relation),
+) -> Result(List(#(String, String)), String) {
+  case relation {
+    None -> Ok(fields)
+    Some(relation) ->
+      case list.any(fields, fn(f) { f.0 == relation.field }) {
+        True ->
+          Error(
+            "--belongs-to "
+            <> relation.plural
+            <> " adds the field "
+            <> relation.field
+            <> " itself; leave it out of the field list.",
+          )
+        False -> Ok(list.append(fields, [#(relation.field, "int")]))
+      }
+  }
+}
+
 fn generate_resource(
   app: String,
   name: String,
   fields: List(#(String, String)),
   api_mode: Bool,
+  relation: Option(Relation),
   db: DbChoice,
 ) {
   let singular = singularize(name)
@@ -197,7 +300,15 @@ fn generate_resource(
     True ->
       simplifile.write(
         handler_path,
-        api_resource_handler(app, name, singular, type_name, db, fields),
+        api_resource_handler(
+          app,
+          name,
+          singular,
+          type_name,
+          db,
+          fields,
+          relation,
+        ),
       )
     False ->
       simplifile.write(
@@ -209,6 +320,7 @@ fn generate_resource(
           type_name,
           first_field,
           db,
+          relation,
         ),
       )
   }
@@ -219,7 +331,7 @@ fn generate_resource(
       let assert Ok(_) =
         simplifile.write(
           views_path,
-          resource_views(app, name, singular, type_name, fields),
+          resource_views(app, name, singular, type_name, fields, relation),
         )
       let assert Ok(_) =
         simplifile.write(
@@ -245,17 +357,49 @@ fn generate_resource(
   let assert Ok(_) =
     simplifile.write(
       repo_path,
-      resource_repo(app, singular, type_name, fields, db),
+      resource_repo(app, singular, type_name, fields, db, relation, !api_mode),
     )
 
   let assert Ok(_) =
-    simplifile.write(migration_path, resource_migration(name, fields, db))
+    simplifile.write(
+      migration_path,
+      resource_migration(name, fields, db, relation),
+    )
 
   let assert Ok(_) =
     simplifile.write(test_path, case api_mode {
       True -> api_resource_test(app, name, singular, db, fields)
-      False -> resource_test(app, name, singular, fields, db)
+      // A --belongs-to form re-renders with the parents from the database,
+      // which these tests do not start on Postgres
+      False ->
+        resource_test(app, name, singular, fields, db, case relation, db {
+          Some(_), Postgres -> False
+          _, _ -> True
+        })
     })
+
+  // An HTML child gets a component listing it on the parent's show page
+  let children = case relation, api_mode {
+    Some(relation), False ->
+      Some(generate_children(
+        app,
+        name,
+        singular,
+        type_name,
+        fields,
+        relation,
+        db,
+      ))
+    _, _ -> None
+  }
+  let created_paths = case children {
+    Some(children) -> list.append(created_paths, [children.component_path])
+    None -> created_paths
+  }
+  let patched_paths = case children {
+    Some(Children(patched: Some(path), ..)) -> [path]
+    _ -> []
+  }
 
   // Patch router and format
   let _ = case api_mode {
@@ -263,7 +407,9 @@ fn generate_resource(
     False -> patch_router_resource(app, name, singular)
   }
   let router_path = "src/" <> app <> "/router.gleam"
-  format.format_files([router_path, ..created_paths])
+  format.format_files(
+    list.flatten([[router_path], created_paths, patched_paths]),
+  )
 
   io.println("")
   io.println("Created:")
@@ -279,9 +425,27 @@ fn generate_resource(
   io.println("  " <> repo_path)
   io.println("  " <> migration_path)
   io.println("  " <> test_path)
+  case children {
+    Some(children) -> io.println("  " <> children.component_path)
+    None -> Nil
+  }
   io.println("")
   io.println("Updated:")
   io.println("  " <> router_path)
+  list.each(patched_paths, fn(path) {
+    io.println("  " <> path <> " (lists the " <> name <> " on the show page)")
+  })
+  case children {
+    Some(Children(instructions: [_, ..] as lines, ..)) -> {
+      io.println("")
+      list.each(lines, io.println)
+    }
+    _ -> Nil
+  }
+  case relation {
+    Some(relation) -> print_relation_notes(app, name, relation, db)
+    None -> Nil
+  }
 }
 
 /// A field whose Gleam type is `String`: string, text, date or datetime.
@@ -289,6 +453,60 @@ fn is_plain_string(field_type: String) -> Bool {
   case field_type {
     "string" | "text" | "date" | "datetime" -> True
     _ -> False
+  }
+}
+
+/// Notes for a `--belongs-to` resource that depend on the database.
+fn print_relation_notes(
+  app: String,
+  name: String,
+  relation: Relation,
+  db: DbChoice,
+) {
+  io.println("")
+  io.println(
+    "Each of the "
+    <> name
+    <> " belongs to a "
+    <> relation.singular
+    <> " ("
+    <> relation.field
+    <> " REFERENCES "
+    <> relation.table
+    <> "(id) ON DELETE CASCADE): deleting a "
+    <> relation.singular
+    <> " deletes its "
+    <> name
+    <> ".",
+  )
+  case db {
+    Sqlite -> {
+      // SQLite enforces foreign keys only on connections that ask for it.
+      // Repos generated since 0.6 turn them on in `delete`.
+      let parent_repo =
+        "src/" <> app <> "/data/" <> relation.singular <> "_repo.gleam"
+      case simplifile.read(parent_repo) {
+        Ok(content) ->
+          case string.contains(content, "PRAGMA foreign_keys = ON") {
+            True -> Nil
+            False -> {
+              io.println(
+                "SQLite only enforces foreign keys (and ON DELETE CASCADE) when a connection",
+              )
+              io.println(
+                "turns them on. Add this line to `delete` in "
+                <> parent_repo
+                <> ", after `use conn <- sqlight.with_connection(db_path)`:",
+              )
+              io.println(
+                "  use _ <- result.try(sqlight.exec(\"PRAGMA foreign_keys = ON\", conn) |> result.replace_error(Nil))",
+              )
+            }
+          }
+        Error(_) -> Nil
+      }
+    }
+    _ -> Nil
   }
 }
 
@@ -935,6 +1153,7 @@ fn api_resource_handler(
   type_name: String,
   db: DbChoice,
   fields: List(#(String, String)),
+  relation: Option(Relation),
 ) -> String {
   let db_arg = case db {
     Sqlite -> "ctx.db_path"
@@ -960,6 +1179,46 @@ fn api_resource_handler(
       "    #(\"" <> name <> "\", " <> value <> "),"
     })
     |> string.join("\n")
+
+  let update_call =
+    "case " <> repo <> ".update(" <> db_arg <> ", item.id, params) {
+            Ok(item) -> json_response(to_json(item), 200)
+            Error(_) -> internal_error()
+          }"
+
+  // --belongs-to: a body whose parent id has no row is a 422
+  let #(check_create, update_record, parent_import, check_fn) = case relation {
+    None -> #("", "\n          " <> update_call, "", "")
+    Some(relation) -> {
+      let check = "check_" <> relation.singular
+      #("\n    |> result.try(" <> check <> "(ctx, _))", "
+          case " <> check <> "(ctx, params) {
+            Error(error) -> invalid_body(error)
+            Ok(params) ->
+              " <> update_call <> "
+          }", "\nimport "
+        <> app_name
+        <> "/data/"
+        <> relation.singular
+        <> "_repo", "
+
+/// The " <> relation.singular <> " a " <> resource_singular <> " belongs to must exist.
+fn " <> check <> "(
+  ctx: Context,
+  params: " <> form <> "." <> type_name <> "Params,
+) -> Result(" <> form <> "." <> type_name <> "Params, " <> form <> ".JsonError) {
+  case " <> relation.singular <> "_repo.get(" <> db_arg <> ", params." <> relation.field <> ") {
+    Ok(_) -> Ok(params)
+    Error(_) ->
+      Error(
+        " <> form <> ".InvalidParams([
+          #(\"" <> relation.field <> "\", \"" <> relation.type_name <> " does not exist\"),
+        ]),
+      )
+  }
+}")
+    }
+  }
 
   "//// JSON API for "
   <> resource_plural
@@ -987,6 +1246,7 @@ import "
   <> app_name
   <> "/data/"
   <> repo
+  <> parent_import
   <> "
 import "
   <> app_name
@@ -1024,7 +1284,9 @@ pub fn create(req: Request, ctx: Context) -> Response {
 
   case "
   <> form
-  <> ".decode_json(body) {
+  <> ".decode_json(body)"
+  <> check_create
+  <> " {
     Error(error) -> invalid_body(error)
     Ok(params) ->
       case "
@@ -1057,15 +1319,9 @@ pub fn update(req: Request, ctx: Context, id: String) -> Response {
     Ok(params) ->
       case find(ctx, id) {
         Error(_) -> not_found()
-        Ok(item) ->
-          case "
-  <> repo
-  <> ".update("
-  <> db_arg
-  <> ", item.id, params) {
-            Ok(item) -> json_response(to_json(item), 200)
-            Error(_) -> internal_error()
-          }
+        Ok(item) ->"
+  <> update_record
+  <> "
       }
   }
 }
@@ -1159,6 +1415,258 @@ fn not_found() -> Response {
 fn internal_error() -> Response {
   json.object([#(\"error\", json.string(\"internal server error\"))])
   |> json_response(500)
+}"
+  <> check_fn
+  <> "
+"
+}
+
+// --belongs-to: children on the parent's show page ---------------------------
+
+/// What `generate_children` wrote: the component, and the parent handler
+/// it patched or the instructions to wire the component in by hand.
+type Children {
+  Children(
+    component_path: String,
+    patched: Option(String),
+    instructions: List(String),
+  )
+}
+
+/// Write `web/components/<child>_list.gleam` and render it on the parent's
+/// show page. The parent's handler is patched only when its `show` still
+/// renders `<parent>_views.show_view(item)` exactly once, as generated;
+/// otherwise the CLI prints what to add.
+fn generate_children(
+  app: String,
+  plural: String,
+  singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+  db: DbChoice,
+) -> Children {
+  let component_path =
+    "src/" <> app <> "/web/components/" <> singular <> "_list.gleam"
+  ensure_dir_for(component_path)
+  let assert Ok(_) =
+    simplifile.write(
+      component_path,
+      children_component(app, plural, singular, type_name, fields, relation),
+    )
+
+  let db_arg = case db {
+    Sqlite -> "ctx.db_path"
+    _ -> "ctx.db"
+  }
+  let render_call =
+    singular
+    <> "_list.render(item.id, "
+    <> singular
+    <> "_repo.list_for_"
+    <> relation.singular
+    <> "("
+    <> db_arg
+    <> ", item.id))"
+  let parent_handler =
+    "src/" <> app <> "/web/" <> relation.singular <> "_handler.gleam"
+  let show_call = relation.singular <> "_views.show_view(item)"
+  let repo_import = "import " <> app <> "/data/" <> singular <> "_repo"
+  let component_import =
+    "import " <> app <> "/web/components/" <> singular <> "_list"
+
+  let patched = {
+    use content <- result.try(
+      simplifile.read(parent_handler) |> result.replace_error(Nil),
+    )
+    use content <- result.try(patch_parent_show(content, show_call, render_call))
+    let content = case imports_lustre_element(content) {
+      True -> content
+      False -> add_import(content, "import lustre/element")
+    }
+    let content =
+      content
+      |> add_import(repo_import)
+      |> add_import(component_import)
+    simplifile.write(parent_handler, content) |> result.replace_error(Nil)
+  }
+
+  case patched {
+    Ok(_) -> Children(component_path, Some(parent_handler), [])
+    Error(_) ->
+      Children(component_path, None, [
+        "To list the "
+          <> plural
+          <> " on a "
+          <> relation.singular
+          <> "'s page, render the component in `show` of "
+          <> parent_handler
+          <> ":",
+        "",
+        "  import lustre/element",
+        "  " <> repo_import,
+        "  " <> component_import,
+        "",
+        "  element.fragment([",
+        "    " <> show_call <> ",",
+        "    " <> render_call <> ",",
+        "  ])",
+      ])
+  }
+}
+
+/// Render `render_call` after the parent's show view: wrap the generated
+/// `show_view(item)` in an `element.fragment`, or add to the fragment an
+/// earlier `--belongs-to` child made.
+fn patch_parent_show(
+  content: String,
+  show_call: String,
+  render_call: String,
+) -> Result(String, Nil) {
+  case string.contains(content, render_call) {
+    True -> Ok(content)
+    False ->
+      case string.split(content, show_call <> ",\n") {
+        [before, after] ->
+          Ok(before <> show_call <> ",\n" <> render_call <> ",\n" <> after)
+        _ ->
+          case string.split(content, show_call <> "\n") {
+            [before, after] ->
+              Ok(
+                before
+                <> "element.fragment([\n"
+                <> show_call
+                <> ",\n"
+                <> render_call
+                <> ",\n])\n"
+                <> after,
+              )
+            _ -> Error(Nil)
+          }
+      }
+  }
+}
+
+/// Whether a module imports `lustre/element` itself (not only a submodule
+/// such as `lustre/element/html`).
+fn imports_lustre_element(content: String) -> Bool {
+  content
+  |> string.split("\n")
+  |> list.any(fn(line) {
+    line == "import lustre/element"
+    || string.starts_with(line, "import lustre/element.{")
+    || string.starts_with(line, "import lustre/element as ")
+  })
+}
+
+fn children_component(
+  app: String,
+  plural: String,
+  singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+) -> String {
+  let label = case list.find(fields, fn(f) { is_plain_string(f.1) }) {
+    Ok(#(name, _)) -> "item." <> name
+    Error(_) -> "\"" <> type_name <> " #\" <> int.to_string(item.id)"
+  }
+  let parent_id = relation.field
+
+  "//// The "
+  <> plural
+  <> " of a "
+  <> relation.singular
+  <> ", for the "
+  <> relation.singular
+  <> "'s show page.
+////
+//// `gen resource "
+  <> plural
+  <> " --belongs-to "
+  <> relation.plural
+  <> "` renders it in `show` of
+//// web/"
+  <> relation.singular
+  <> "_handler.gleam, after the "
+  <> relation.singular
+  <> ":
+////
+////     "
+  <> singular
+  <> "_list.render(item.id, "
+  <> singular
+  <> "_repo.list_for_"
+  <> relation.singular
+  <> "(db, item.id))
+
+import gleam/int
+import gleam/list
+import "
+  <> app
+  <> "/domain/"
+  <> singular
+  <> ".{type "
+  <> type_name
+  <> "}
+import lustre/attribute.{class, href}
+import lustre/element.{type Element, text}
+import lustre/element/html.{a, h2, li, p, section, ul}
+
+pub fn render("
+  <> parent_id
+  <> ": Int, items: List("
+  <> type_name
+  <> ")) -> Element(Nil) {
+  section([class(\""
+  <> plural
+  <> "\")], [
+    h2([], [text(\""
+  <> capitalize(plural)
+  <> "\")]),
+    case items {
+      [] -> p([], [text(\"No "
+  <> plural
+  <> " yet.\")])
+      _ ->
+        ul(
+          [],
+          list.map(items, fn(item) {
+            li([], [
+              a([href(\"/"
+  <> plural
+  <> "/\" <> int.to_string(item.id))], [
+                text("
+  <> label
+  <> "),
+              ]),
+            ])
+          }),
+        )
+    },
+    // /"
+  <> plural
+  <> "/new?"
+  <> parent_id
+  <> "=<id> preselects the "
+  <> relation.singular
+  <> " in the form
+    a(
+      [
+        href(\"/"
+  <> plural
+  <> "/new?"
+  <> parent_id
+  <> "=\" <> int.to_string("
+  <> parent_id
+  <> ")),
+        class(\"btn\"),
+      ],
+      [text(\"New "
+  <> type_name
+  <> "\")],
+    ),
+  ])
 }
 "
 }
@@ -1169,16 +1677,47 @@ fn resource_views(
   resource_singular: String,
   type_name: String,
   fields: List(#(String, String)),
+  relation: Option(Relation),
 ) -> String {
+  let is_relation = fn(field_name: String) {
+    case relation {
+      Some(relation) -> relation.field == field_name
+      None -> False
+    }
+  }
+
   let form_field_elements =
     fields
-    |> list.map(form_field_element)
+    |> list.map(fn(f) {
+      case relation {
+        Some(relation) if relation.field == f.0 -> relation_select(relation)
+        _ -> form_field_element(f)
+      }
+    })
     |> string.join("\n")
 
   let show_field_elements =
     fields
-    |> list.map(fn(f) { "      dt([], [text(\"" <> capitalize(f.0) <> "\")]),
-      dd([], [text(" <> show_value(f) <> ")])," })
+    |> list.map(fn(f) {
+      let #(fname, _) = f
+      let #(label_text, value) = case relation {
+        Some(relation) if relation.field == fname -> #(
+          relation.type_name,
+          "a([href(\"/"
+            <> relation.plural
+            <> "/\" <> int.to_string(item."
+            <> fname
+            <> "))], [text(\""
+            <> relation.type_name
+            <> " #\" <> int.to_string(item."
+            <> fname
+            <> "))])",
+        )
+        _ -> #(capitalize(fname), "text(" <> show_value(f) <> ")")
+      }
+      "      dt([], [text(\"" <> label_text <> "\")]),
+      dd([], [" <> value <> "]),"
+    })
     |> string.join("\n")
 
   let float_import = case
@@ -1190,13 +1729,16 @@ fn resource_views(
 
   // Import only what the field elements use: an unused import would be
   // a warning in the generated module. `text` fields render a textarea,
-  // optional bools a select, every other type an input; all but text
-  // fields and checkboxes set a value.
+  // optional bools and the --belongs-to field a select, every other type
+  // an input; all but text fields and checkboxes set a value.
   let uses = fn(predicate: fn(#(String, String)) -> Bool) {
     list.any(fields, predicate)
   }
   let renders_input = fn(f: #(String, String)) {
-    base_type(f.1) != "text" && f.1 != "optional(bool)"
+    let #(fname, ftype) = f
+    base_type(ftype) != "text"
+    && ftype != "optional(bool)"
+    && !is_relation(fname)
   }
   let attribute_imports =
     ["class", "href", "name"]
@@ -1212,6 +1754,12 @@ fn resource_views(
     |> list.append(["label", "li", "p", "section"])
     |> append_if(uses(fn(f) { base_type(f.1) == "text" }), "textarea")
     |> list.append(["ul"])
+
+  let options_param = case relation {
+    Some(relation) ->
+      "\n  " <> relation.singular <> "_options: List(#(Int, String)),"
+    None -> ""
+  }
 
   // index_view and show_view label a record with its first required
   // string field, or with its id
@@ -1280,7 +1828,7 @@ pub fn show_view(item: " <> type_name <> ") -> Element(Nil) {
 
 pub fn form_view(
   values: " <> resource_singular <> "_form." <> type_name <> "Form,
-  errors: List(#(String, String)),
+  errors: List(#(String, String))," <> options_param <> "
 ) -> Element(Nil) {
   // Updates are sent as POST /<id>?_method=PUT: wisp.method_override
   // reads the method from the _method query parameter.
@@ -1384,6 +1932,28 @@ fn form_field_element(field: #(String, String)) -> String {
       labelled(input("text", "", "option.unwrap(values." <> fname <> ", \"\")"))
     _ -> labelled(input("text", "", "values." <> fname))
   }
+}
+
+/// The `--belongs-to` field: a select of the parents, labelled by the
+/// parent's first string field (or its id).
+fn relation_select(relation: Relation) -> String {
+  let fname = relation.field
+  "      div([class(\"field\")], [
+        label([], [text(\"" <> relation.type_name <> "\")]),
+        html.select([name(\"" <> fname <> "\")], [
+          html.option([value(\"\")], \"Choose a " <> relation.singular <> "\"),
+          ..list.map(" <> relation.singular <> "_options, fn(choice) {
+            html.option(
+              [
+                value(int.to_string(choice.0)),
+                attribute.selected(choice.0 == values." <> fname <> "),
+              ],
+              choice.1,
+            )
+          })
+        ]),
+        field_error(errors, \"" <> fname <> "\"),
+      ]),"
 }
 
 /// The text the show view renders for a field; `None` is an em dash.
@@ -1712,12 +2282,30 @@ fn resource_repo(
   type_name: String,
   fields: List(#(String, String)),
   db: DbChoice,
+  relation: Option(Relation),
+  with_options: Bool,
 ) -> String {
-  case db {
-    Sqlite | NoDb ->
-      resource_repo_sqlite(app_name, resource_singular, type_name, fields)
-    Postgres ->
-      resource_repo_pog(app_name, resource_singular, type_name, fields)
+  let #(repo, relation_functions) = case db {
+    Sqlite | NoDb -> #(
+      resource_repo_sqlite(app_name, resource_singular, type_name, fields),
+      relation_functions_sqlite,
+    )
+    Postgres -> #(
+      resource_repo_pog(app_name, resource_singular, type_name, fields),
+      relation_functions_pog,
+    )
+  }
+  case relation {
+    None -> repo
+    Some(relation) ->
+      repo
+      <> relation_functions(
+        resource_singular,
+        type_name,
+        fields,
+        relation,
+        with_options,
+      )
   }
 }
 
@@ -1992,6 +2580,12 @@ fn resource_repo_sqlite(
       "",
       "pub fn delete(db_path: String, id: Int) -> Result(Nil, Nil) {",
       "  use conn <- sqlight.with_connection(db_path)",
+      "  // SQLite enforces foreign keys, and so the ON DELETE CASCADE of",
+      "  // --belongs-to children, only on connections that turn them on.",
+      "  use _ <- result.try(",
+      "    sqlight.exec(\"PRAGMA foreign_keys = ON\", conn)",
+      "    |> result.replace_error(Nil),",
+      "  )",
       "  sqlight.query("
         <> q
         <> "DELETE FROM "
@@ -2223,17 +2817,177 @@ fn resource_repo_pog(
   )
 }
 
+// --belongs-to repo functions -------------------------------------------------
+
+/// The SQL for the parents a child form offers: `id` and a label, the
+/// parent's first string field or `<Parent> #<id>`.
+fn options_sql(relation: Relation, label_cast: String) -> String {
+  case relation.label {
+    Some(label) ->
+      "SELECT id, "
+      <> label
+      <> label_cast
+      <> " FROM "
+      <> relation.table
+      <> " ORDER BY "
+      <> label
+      <> ", id"
+    None ->
+      "SELECT id, '"
+      <> relation.type_name
+      <> " #' || id FROM "
+      <> relation.table
+      <> " ORDER BY id"
+  }
+}
+
+fn options_doc(resource_singular: String, relation: Relation) -> String {
+  "/// The "
+  <> relation.plural
+  <> " a "
+  <> resource_singular
+  <> " can belong to, as `#(id, label)` pairs for the\n/// form's select."
+}
+
+fn list_for_doc(type_name: String, relation: Relation) -> String {
+  "/// The "
+  <> type_name
+  <> " records of one "
+  <> relation.singular
+  <> ", oldest first."
+}
+
+fn relation_functions_sqlite(
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+  with_options: Bool,
+) -> String {
+  let q = "\""
+  let select_fields =
+    ["id", ..list.map(fields, fn(f) { f.0 })] |> string.join(", ")
+  let table = resource_singular <> "s"
+  let list_for = "
+" <> list_for_doc(type_name, relation) <> "
+pub fn list_for_" <> relation.singular <> "(db_path: String, " <> relation.field <> ": Int) -> List(" <> type_name <> ") {
+  use conn <- sqlight.with_connection(db_path)
+  case
+    sqlight.query(
+      " <> q <> "SELECT " <> select_fields <> " FROM " <> table <> " WHERE " <> relation.field <> " = ? ORDER BY id" <> q <> ",
+      on: conn,
+      with: [sqlight.int(" <> relation.field <> ")],
+      expecting: " <> resource_singular <> "_decoder(),
+    )
+  {
+    Ok(rows) -> rows
+    Error(_) -> []
+  }
+}
+"
+  let options = case with_options {
+    False -> ""
+    True -> "
+" <> options_doc(resource_singular, relation) <> "
+pub fn " <> relation.singular <> "_options(db_path: String) -> List(#(Int, String)) {
+  use conn <- sqlight.with_connection(db_path)
+  let decoder = {
+    use id <- decode.field(0, decode.int)
+    use label <- decode.field(1, decode.string)
+    decode.success(#(id, label))
+  }
+  case
+    sqlight.query(
+      " <> q <> options_sql(relation, "") <> q <> ",
+      on: conn,
+      with: [],
+      expecting: decoder,
+    )
+  {
+    Ok(rows) -> rows
+    Error(_) -> []
+  }
+}
+"
+  }
+  list_for <> options
+}
+
+fn relation_functions_pog(
+  resource_singular: String,
+  type_name: String,
+  fields: List(#(String, String)),
+  relation: Relation,
+  with_options: Bool,
+) -> String {
+  let q = "\""
+  let select_fields =
+    ["id", ..list.map(fields, pog_select_column)] |> string.join(", ")
+  let table = resource_singular <> "s"
+  let list_for = "
+" <> list_for_doc(type_name, relation) <> "
+pub fn list_for_" <> relation.singular <> "(db: pog.Connection, " <> relation.field <> ": Int) -> List(" <> type_name <> ") {
+  pog.query(
+    " <> q <> "SELECT " <> select_fields <> " FROM " <> table <> " WHERE " <> relation.field <> " = $1 ORDER BY id" <> q <> ",
+  )
+  |> pog.parameter(pog.int(" <> relation.field <> "))
+  |> pog.returning(" <> resource_singular <> "_decoder())
+  |> pog.execute(db)
+  |> result.map(fn(r) { r.rows })
+  |> result.unwrap([])
+}
+"
+  let options = case with_options {
+    False -> ""
+    True -> "
+" <> options_doc(resource_singular, relation) <> "
+pub fn " <> relation.singular <> "_options(db: pog.Connection) -> List(#(Int, String)) {
+  let decoder = {
+    use id <- decode.field(0, decode.int)
+    use label <- decode.field(1, decode.string)
+    decode.success(#(id, label))
+  }
+  pog.query(" <> q <> options_sql(relation, "::text") <> q <> ")
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+  |> result.map(fn(r) { r.rows })
+  |> result.unwrap([])
+}
+"
+  }
+  list_for <> options
+}
+
 fn resource_migration(
   name: String,
   fields: List(#(String, String)),
   db: DbChoice,
+  relation: Option(Relation),
 ) -> String {
   let column_defs =
     fields
-    |> list.map(fn(f) { "  " <> f.0 <> " " <> column_definition(f, db) })
+    |> list.map(fn(f) {
+      "  " <> f.0 <> " " <> column_definition(f, db, relation)
+    })
     |> string.join(",\n")
 
   let table = singularize(name) <> "s"
+
+  // The foreign key of --belongs-to is indexed: list_for_<parent> filters
+  // on it.
+  let index = case relation {
+    Some(relation) ->
+      "CREATE INDEX "
+      <> table
+      <> "_"
+      <> relation.field
+      <> "_index ON "
+      <> table
+      <> " ("
+      <> relation.field
+      <> ");\n"
+    None -> ""
+  }
 
   case db {
     Sqlite -> "CREATE TABLE " <> table <> " (
@@ -2242,14 +2996,14 @@ fn resource_migration(
   inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-"
+" <> index
     _ -> "CREATE TABLE " <> table <> " (
   id SERIAL PRIMARY KEY,
 " <> column_defs <> ",
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-"
+" <> index
   }
 }
 
@@ -2417,6 +3171,7 @@ fn resource_test(
   resource_singular: String,
   fields: List(#(String, String)),
   db: DbChoice,
+  rerender_test: Bool,
 ) -> String {
   // Build valid form data for decode test
   let valid_values =
@@ -2449,7 +3204,9 @@ pub fn decode_missing_" <> name <> "_returns_error_test() {
   " <> resource_singular <> "_form.decode(data)
   |> should.be_error
 }
-
+" <> case rerender_test {
+        False -> ""
+        True -> "
 pub fn same_origin_invalid_create_rerenders_form_test() {
   // browser_request sends an Origin header matching the host, as a
   // browser does when it submits the form on /" <> resource_plural <> "/new.
@@ -2462,6 +3219,7 @@ pub fn same_origin_invalid_create_rerenders_form_test() {
   |> should.equal(422)
 }
 "
+      }
     [] -> ""
   }
 
@@ -2832,10 +3590,15 @@ pub fn to_gleam_type(field_type: String) -> String {
   }
 }
 
-/// The column definition after the column name: the SQL type, and
-/// `NOT NULL` unless the field is optional.
-fn column_definition(field: #(String, String), db: DbChoice) -> String {
-  let #(_, field_type) = field
+/// The column definition after the column name: the SQL type, `NOT NULL`
+/// unless the field is optional, and for the `--belongs-to` field a
+/// foreign key to the parent.
+fn column_definition(
+  field: #(String, String),
+  db: DbChoice,
+  relation: Option(Relation),
+) -> String {
+  let #(field_name, field_type) = field
   let sql_type = case db {
     Sqlite -> to_sql_type_sqlite(base_type(field_type))
     _ -> to_sql_type(base_type(field_type))
@@ -2844,7 +3607,12 @@ fn column_definition(field: #(String, String), db: DbChoice) -> String {
     True -> ""
     False -> " NOT NULL"
   }
-  sql_type <> null
+  let reference = case relation {
+    Some(relation) if relation.field == field_name ->
+      " REFERENCES " <> relation.table <> "(id) ON DELETE CASCADE"
+    _ -> ""
+  }
+  sql_type <> null <> reference
 }
 
 pub fn to_sql_type(field_type: String) -> String {

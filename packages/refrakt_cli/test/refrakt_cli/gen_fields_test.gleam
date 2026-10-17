@@ -1,6 +1,8 @@
-/// Tests for field specs and optional(T) fields (#35).
+/// Tests for field specs, optional(T) fields (#35) and --belongs-to
+/// relations (#23).
 ///
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
 import refrakt_cli/gen
@@ -73,6 +75,23 @@ pub fn optional_type_helpers_test() {
   gen.base_type("text") |> should.equal("text")
   gen.to_gleam_type("optional(float)") |> should.equal("Option(Float)")
   gen.to_gleam_type("optional(date)") |> should.equal("Option(String)")
+}
+
+pub fn first_string_field_test() {
+  gen.first_string_field(
+    "pub type Post {\n  Post(id: Int, title: String, published: Bool)\n}\n",
+  )
+  |> should.equal(Some("title"))
+  gen.first_string_field(
+    "pub type Post {\n  Post(\n    id: Int,\n    views: Int,\n    body: String,\n  )\n}\n",
+  )
+  |> should.equal(Some("body"))
+  gen.first_string_field(
+    "pub type Tag {\n  Tag(id: Int, name: Option(String), name2: String)\n}\n",
+  )
+  |> should.equal(Some("name2"))
+  gen.first_string_field("pub type Vote {\n  Vote(id: Int, up: Bool)\n}\n")
+  |> should.equal(None)
 }
 
 // =============================================================================
@@ -188,6 +207,165 @@ pub fn gen_resource_with_unknown_option_writes_nothing_test() {
 }
 
 // =============================================================================
+// gen resource --belongs-to
+// =============================================================================
+
+pub fn gen_belongs_to_missing_parent_writes_nothing_test() {
+  in_project("rel_missing", "sqlite", fn(app) {
+    gen.resource("comments", ["body:text", "--belongs-to", "posts"])
+
+    file_exists("src/" <> app <> "/web/comment_handler.gleam")
+    |> should.be_false
+    file_exists("src/" <> app <> "/domain/comment.gleam") |> should.be_false
+    file_contains("src/" <> app <> "/router.gleam", "comment_handler")
+    |> should.be_false
+  })
+}
+
+pub fn gen_belongs_to_needs_a_parent_name_test() {
+  in_project("rel_flag", "sqlite", fn(app) {
+    gen.resource("posts", ["title:string"])
+    gen.resource("comments", ["body:text", "--belongs-to"])
+
+    file_exists("src/" <> app <> "/web/comment_handler.gleam")
+    |> should.be_false
+  })
+}
+
+pub fn gen_belongs_to_sqlite_test() {
+  in_project("rel_sqlite", "sqlite", fn(app) {
+    gen.resource("posts", ["title:string", "body:text"])
+    gen.resource("comments", ["body:text", "--belongs-to", "posts"])
+
+    // The flag's value is not mistaken for a field
+    let domain = "src/" <> app <> "/domain/comment.gleam"
+    file_contains(domain, "post_id: Int") |> should.be_true
+    file_contains(domain, "posts") |> should.be_false
+
+    let migration = "src/" <> app <> "/data/migrations/002_create_comments.sql"
+    file_contains(
+      migration,
+      "post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE",
+    )
+    |> should.be_true
+    file_contains(
+      migration,
+      "CREATE INDEX comments_post_id_index ON comments (post_id);",
+    )
+    |> should.be_true
+
+    let repo = "src/" <> app <> "/data/comment_repo.gleam"
+    file_contains(
+      repo,
+      "pub fn list_for_post(db_path: String, post_id: Int) -> List(Comment)",
+    )
+    |> should.be_true
+    file_contains(repo, "pub fn post_options(db_path: String)")
+    |> should.be_true
+    file_contains(repo, "SELECT id, title FROM posts ORDER BY title, id")
+    |> should.be_true
+
+    // The parent's repo turns on SQLite foreign keys for ON DELETE CASCADE
+    file_contains(
+      "src/" <> app <> "/data/post_repo.gleam",
+      "PRAGMA foreign_keys = ON",
+    )
+    |> should.be_true
+
+    // The form offers the posts; the handler checks the post exists
+    let views = "src/" <> app <> "/web/comment_views.gleam"
+    file_contains(views, "post_options: List(#(Int, String))")
+    |> should.be_true
+    file_contains(views, "html.select([name(\"post_id\")]") |> should.be_true
+    file_contains(views, "href(\"/posts/\" <> int.to_string(item.post_id))")
+    |> should.be_true
+    let handler = "src/" <> app <> "/web/comment_handler.gleam"
+    file_contains(handler, "fn check_post(") |> should.be_true
+    file_contains(handler, "\"Post does not exist\"") |> should.be_true
+    file_contains(handler, "result.try(check_post(ctx, _))") |> should.be_true
+    file_contains(handler, "list.key_find(wisp.get_query(req), \"post_id\")")
+    |> should.be_true
+
+    // The post's show page lists its comments
+    file_exists("src/" <> app <> "/web/components/comment_list.gleam")
+    |> should.be_true
+    let post_handler = "src/" <> app <> "/web/post_handler.gleam"
+    file_contains(post_handler, "element.fragment([") |> should.be_true
+    file_contains(
+      post_handler,
+      "comment_repo.list_for_post(ctx.db_path, item.id)",
+    )
+    |> should.be_true
+    file_contains(post_handler, "import lustre/element\n") |> should.be_true
+    file_contains(
+      post_handler,
+      "import " <> app <> "/web/components/comment_list",
+    )
+    |> should.be_true
+
+    // Flat routes
+    file_contains("src/" <> app <> "/router.gleam", "[\"comments\", id]")
+    |> should.be_true
+  })
+}
+
+pub fn gen_two_children_patch_one_fragment_test() {
+  in_project("rel_two", "sqlite", fn(app) {
+    gen.resource("posts", ["title:string"])
+    gen.resource("comments", ["body:text", "--belongs-to", "posts"])
+    gen.resource("likes", ["note:string", "--belongs-to=posts"])
+
+    let assert Ok(content) =
+      simplifile.read("src/" <> app <> "/web/post_handler.gleam")
+    count(content, "element.fragment([") |> should.equal(1)
+    string.contains(content, "comment_list.render(") |> should.be_true
+    string.contains(content, "like_list.render(") |> should.be_true
+  })
+}
+
+pub fn gen_belongs_to_api_parent_prints_instructions_test() {
+  in_project("rel_api_parent", "sqlite", fn(app) {
+    gen.resource("posts", ["title:string", "--api"])
+    gen.resource("comments", ["body:text", "--belongs-to", "posts"])
+
+    // The component is generated, the JSON handler is left alone
+    file_exists("src/" <> app <> "/web/components/comment_list.gleam")
+    |> should.be_true
+    file_contains("src/" <> app <> "/web/post_handler.gleam", "comment_list")
+    |> should.be_false
+  })
+}
+
+pub fn gen_belongs_to_api_child_test() {
+  in_project("rel_api", "postgres", fn(app) {
+    gen.resource("posts", ["title:string"])
+    gen.resource("votes", ["up:bool", "--belongs-to", "posts", "--api"])
+
+    let handler = "src/" <> app <> "/web/vote_handler.gleam"
+    file_contains(handler, "vote_form.InvalidParams([") |> should.be_true
+    file_contains(handler, "post_repo.get(ctx.db, params.post_id)")
+    |> should.be_true
+
+    let repo = "src/" <> app <> "/data/vote_repo.gleam"
+    file_contains(
+      repo,
+      "pub fn list_for_post(db: pog.Connection, post_id: Int)",
+    )
+    |> should.be_true
+    // No form, so no select options
+    file_contains(repo, "post_options") |> should.be_false
+    file_exists("src/" <> app <> "/web/components/vote_list.gleam")
+    |> should.be_false
+
+    file_contains(
+      "src/" <> app <> "/data/migrations/002_create_votes.sql",
+      "post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE",
+    )
+    |> should.be_true
+  })
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
@@ -220,6 +398,10 @@ fn file_contains(path: String, substring: String) -> Bool {
     Ok(content) -> string.contains(content, substring)
     Error(_) -> False
   }
+}
+
+fn count(haystack: String, needle: String) -> Int {
+  list.length(string.split(haystack, needle)) - 1
 }
 
 @external(erlang, "refrakt_cli_test_ffi", "set_cwd")
