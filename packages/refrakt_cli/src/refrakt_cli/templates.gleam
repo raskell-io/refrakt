@@ -614,6 +614,13 @@ a:hover {
   display: flex;
   gap: 0.5rem;
 }
+
+.pagination {
+  margin-top: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
 "
 }
 
@@ -966,11 +973,18 @@ import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
 import " <> app_name <> "/web/layouts/root_layout
 import " <> app_name <> "/web/" <> resource_singular <> "_views
 import refrakt/flash
+import refrakt/paginate
 import wisp.{type Request, type Response}
 
-pub fn index(_req: Request, ctx: Context) -> Response {
-  let items = " <> resource_singular <> "_repo.list(" <> db_arg <> ")
-  " <> resource_singular <> "_views.index_view(items)
+/// How many " <> resource_plural <> " the index shows per page.
+pub const per_page = 20
+
+/// `GET /" <> resource_plural <> "?page=2`. A missing, invalid or negative page is page 1.
+pub fn index(req: Request, ctx: Context) -> Response {
+  let params = paginate.Params(page: paginate.page_number(req), per_page:)
+
+  " <> resource_singular <> "_repo.list(" <> db_arg <> ", params)
+  |> " <> resource_singular <> "_views.index_view
   |> root_layout.wrap(\"" <> type_name <> "s\")
   |> wisp.html_response(200)
 }

@@ -71,10 +71,11 @@ rejected with 403 and that a same-origin `POST /posts` with an empty
 form re-renders the form with 422. Neither request reaches the
 database.
 
-One more test runs against [the test database](#tests-against-the-database):
+Two more tests run against [the test database](#tests-against-the-database):
 `create_show_update_delete_test` creates a post through the router,
 follows the redirect to its page, updates it, deletes it and checks
-that it is gone:
+that it is gone, and `index_is_paginated_test` creates one post more
+than fits on a page (`post_handler.per_page`) and checks both pages:
 
 ```gleam
 pub fn create_show_update_delete_test() {
@@ -97,7 +98,9 @@ pub fn create_show_update_delete_test() {
 }
 ```
 
-`--api` resources get the same test with JSON requests.
+`--api` resources get the same two tests with JSON requests; the
+pagination test checks the `data`, `per_page` and `total` of
+`/api/posts?page=2&per_page=2`.
 
 ### Auth tests
 
@@ -341,7 +344,7 @@ test/
 
 - Test forms and domain logic first — they don't need a database
 - Generated tests cover the happy path, missing required fields and,
-  against the test database, create/show/update/delete
+  against the test database, create/show/update/delete and pagination
 - Add edge case tests for your specific validation rules
 - Use `wisp.FormData` to build test form submissions
 - Keep domain modules free of framework imports so they're easy to test

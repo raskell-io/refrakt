@@ -927,6 +927,11 @@ fn api_resource_handler(
 //// `{\"errors\": {\"field\": \"message\"}}` when validation fails. A body
 //// that is not JSON at all is rejected by `wisp.require_json` (400), as is
 //// a content type other than application/json (415).
+////
+//// The index is paginated: `GET /api/"
+  <> resource_plural
+  <> "?page=2&per_page=50` answers
+//// `{\"data\": [...], \"page\": 2, \"per_page\": 50, \"total\": 120, \"total_pages\": 3}`.
 
 import gleam/dynamic/decode
 import gleam/http/response
@@ -955,15 +960,30 @@ import "
   <> "/web/forms/"
   <> form
   <> "
+import refrakt/paginate
 import wisp.{type Request, type Response}
 
-pub fn index(_req: Request, ctx: Context) -> Response {
-  "
+/// How many "
+  <> resource_plural
+  <> " a page holds when the request has no `per_page`
+/// (which may ask for up to `paginate.max_per_page`).
+pub const per_page = 20
+
+pub fn index(req: Request, ctx: Context) -> Response {
+  let page =
+    "
   <> repo
   <> ".list("
   <> db_arg
-  <> ")
-  |> json.array(to_json)
+  <> ", paginate.from_request_with(req, per_page:))
+
+  json.object([
+    #(\"data\", json.array(page.items, to_json)),
+    #(\"page\", json.int(page.page)),
+    #(\"per_page\", json.int(page.per_page)),
+    #(\"total\", json.int(page.total)),
+    #(\"total_pages\", json.int(page.total_pages)),
+  ])
   |> json_response(200)
 }
 
@@ -1179,12 +1199,12 @@ fn resource_views(
     list.any(fields, fn(f) { predicate(f.1) })
   }
   let attribute_imports =
-    ["class", "href", "name", "type_"]
+    ["class", "href", "name", "rel", "type_"]
     |> append_if(uses(fn(t) { t != "text" && t != "bool" }), "value")
   let html_imports =
     ["a", "button", "div", "form", "h1"]
     |> append_if(uses(fn(t) { t != "text" }), "input")
-    |> list.append(["label", "li", "p", "section"])
+    |> list.append(["label", "li", "nav", "p", "section", "span"])
     |> append_if(uses(fn(t) { t == "text" }), "textarea")
     |> list.append(["ul"])
 
@@ -1196,8 +1216,9 @@ import lustre/element.{type Element, text}
 import lustre/element/html.{" <> string.join(html_imports, ", ") <> "}
 import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
+import refrakt/paginate
 
-pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
+pub fn index_view(page: paginate.Page(" <> type_name <> ")) -> Element(Nil) {
   section([class(\"" <> resource_plural <> "\")], [
     div([class(\"header\")], [
       h1([], [text(\"" <> type_name <> "s\")]),
@@ -1205,7 +1226,7 @@ pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
     ]),
     ul(
       [class(\"post-list\")],
-      list.map(items, fn(item) {
+      list.map(page.items, fn(item) {
         li([], [
           a([href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id))], [
             text(item." <> first_field <> "),
@@ -1213,6 +1234,40 @@ pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
         ])
       }),
     ),
+    pagination(page),
+  ])
+}
+
+/// Links to the previous and next pages, and where this page is.
+fn pagination(page: paginate.Page(item)) -> Element(Nil) {
+  let link = fn(page_number, label, relation) {
+    a(
+      [
+        href(paginate.page_path(\"/" <> resource_plural <> "\", page_number)),
+        rel(relation),
+        class(\"btn\"),
+      ],
+      [text(label)],
+    )
+  }
+
+  nav([class(\"pagination\")], [
+    case paginate.previous_page(page) {
+      Ok(previous) -> link(previous, \"Previous\", \"prev\")
+      Error(_) -> text(\"\")
+    },
+    span([], [
+      text(
+        \"Page \"
+        <> int.to_string(page.page)
+        <> \" of \"
+        <> int.to_string(page.total_pages),
+      ),
+    ]),
+    case paginate.next_page(page) {
+      Ok(next) -> link(next, \"Next\", \"next\")
+      Error(_) -> text(\"\")
+    },
   ])
 }
 
@@ -1567,6 +1622,7 @@ fn resource_repo_sqlite(
         <> "_form.{type "
         <> type_name
         <> "Params}",
+      "import refrakt/paginate",
       "import sqlight",
       "",
       "fn "
@@ -1583,22 +1639,38 @@ fn resource_repo_sqlite(
         <> "))",
       "}",
       "",
-      "pub fn list(db_path: String) -> List(" <> type_name <> ") {",
+      "/// One page of " <> table <> ", newest first, and how many there are.",
+      "pub fn list(db_path: String, params: paginate.Params) -> paginate.Page("
+        <> type_name
+        <> ") {",
       "  use conn <- sqlight.with_connection(db_path)",
-      "  case sqlight.query("
+      "  let items = case sqlight.query(",
+      "    "
         <> q
         <> "SELECT "
         <> select_fields
         <> " FROM "
         <> table
-        <> " ORDER BY id DESC"
+        <> " ORDER BY id DESC LIMIT ? OFFSET ?"
         <> q
-        <> ", on: conn, with: [], expecting: "
-        <> resource_singular
-        <> "_decoder()) {",
+        <> ",",
+      "    on: conn,",
+      "    with: [sqlight.int(params.per_page), sqlight.int(paginate.offset(params))],",
+      "    expecting: " <> resource_singular <> "_decoder(),",
+      "  ) {",
       "    Ok(rows) -> rows",
       "    Error(_) -> []",
       "  }",
+      "  let total = case sqlight.query("
+        <> q
+        <> "SELECT COUNT(*) FROM "
+        <> table
+        <> q
+        <> ", on: conn, with: [], expecting: decode.at([0], decode.int)) {",
+      "    Ok([count]) -> count",
+      "    _ -> 0",
+      "  }",
+      "  paginate.page(items, params, total)",
       "}",
       "",
       "pub fn get(db_path: String, id: Int) -> Result("
@@ -1784,7 +1856,7 @@ fn resource_repo_pog(
     <> select_fields
     <> " FROM "
     <> table
-    <> " ORDER BY id DESC"
+    <> " ORDER BY id DESC LIMIT $1 OFFSET $2"
     <> q
     <> ")"
 
@@ -1867,6 +1939,7 @@ fn resource_repo_pog(
         <> type_name
         <> "Params}",
       "import pog",
+      "import refrakt/paginate",
       "",
       "fn "
         <> resource_singular
@@ -1882,12 +1955,27 @@ fn resource_repo_pog(
         <> "))",
       "}",
       "",
-      "pub fn list(db: pog.Connection) -> List(" <> type_name <> ") {",
+      "/// One page of " <> table <> ", newest first, and how many there are.",
+      "pub fn list(db: pog.Connection, params: paginate.Params) -> paginate.Page("
+        <> type_name
+        <> ") {",
+      "  let items =",
       list_query,
+      "  |> pog.parameter(pog.int(params.per_page))",
+      "  |> pog.parameter(pog.int(paginate.offset(params)))",
       "  |> pog.returning(" <> resource_singular <> "_decoder())",
       "  |> pog.execute(db)",
       "  |> result.map(fn(r) { r.rows })",
       "  |> result.unwrap([])",
+      "  let total = case",
+      "    pog.query(" <> q <> "SELECT COUNT(*) FROM " <> table <> q <> ")",
+      "    |> pog.returning(decode.at([0], decode.int))",
+      "    |> pog.execute(db)",
+      "  {",
+      "    Ok(pog.Returned(rows: [count], ..)) -> count",
+      "    _ -> 0",
+      "  }",
+      "  paginate.page(items, params, total)",
       "}",
       "",
       "pub fn get(db: pog.Connection, id: Int) -> Result("
@@ -2072,13 +2160,14 @@ pub fn create_with_wrong_field_type_returns_400_test() {
 ////
 //// Most cover what a handler answers before it reaches the database:
 //// malformed and invalid bodies, and ids that are not numbers. The tests
-//// at the end create, update and delete a row on the test
+//// at the end create, update, delete and page through rows on the test
 //// database (test/" <> app_name <> "/support/test_db.gleam).
 
 import gleam/dynamic/decode
 import gleam/http
 import gleam/http/response
 import gleam/json
+import gleam/list
 import gleam/string" <> db_imports <> "
 import gleeunit/should
 import " <> app_name <> "/config
@@ -2175,6 +2264,40 @@ pub fn create_show_update_delete_test() {
   gone.status |> should.equal(404)
 }
 
+pub fn index_is_paginated_test() {
+  use ctx <- test_db.with_context()
+  list.repeat(Nil, 3)
+  |> list.each(fn(_) {
+    let created =
+      testing.json_request(http.Post, \"" <> path <> "\", valid_body())
+      |> router.handle_request(ctx)
+    created.status |> should.equal(201)
+  })
+
+  // #(items on the page, per_page, total)
+  index_page(\"" <> path <> "\", ctx)
+  |> should.equal(#(3, " <> handler <> ".per_page, 3))
+  index_page(\"" <> path <> "?per_page=2\", ctx) |> should.equal(#(2, 2, 3))
+  index_page(\"" <> path <> "?page=2&per_page=2\", ctx)
+  |> should.equal(#(1, 2, 3))
+  index_page(\"" <> path <> "?page=3&per_page=2\", ctx)
+  |> should.equal(#(0, 2, 3))
+}
+
+/// How many items an index page holds, its per_page and the total.
+fn index_page(path: String, ctx: Context) -> #(Int, Int, Int) {
+  let response = simulate.request(http.Get, path) |> router.handle_request(ctx)
+  response.status |> should.equal(200)
+  let decoder = {
+    use data <- decode.field(\"data\", decode.list(decode.dynamic))
+    use per_page <- decode.field(\"per_page\", decode.int)
+    use total <- decode.field(\"total\", decode.int)
+    decode.success(#(list.length(data), per_page, total))
+  }
+  let assert Ok(page) = json.parse(simulate.read_body(response), decoder)
+  page
+}
+
 fn updated_body() -> String {
   json.object([
 " <> updated_fields <> "
@@ -2255,6 +2378,7 @@ pub fn same_origin_invalid_create_rerenders_form_test() {
     _ -> #("", "")
   }
 
+  let handler = resource_singular <> "_handler"
   let path = "/" <> resource_plural
 
   let db_tests = "
@@ -2286,9 +2410,43 @@ pub fn create_show_update_delete_test() {
   get(path, ctx).status |> should.equal(404)
 }
 
+pub fn index_is_paginated_test() {
+  use ctx <- test_db.with_context()
+  // One more than fits on a page
+  list.repeat(Nil, " <> handler <> ".per_page + 1)
+  |> list.each(fn(_) {
+    let created =
+      simulate.browser_request(http.Post, \"" <> path <> "\")
+      |> simulate.form_body(form_values())
+      |> router.handle_request(ctx)
+    created.status |> should.equal(303)
+  })
+
+  let first = get(\"" <> path <> "\", ctx) |> simulate.read_body
+  count_items(first) |> should.equal(" <> handler <> ".per_page)
+  string.contains(first, \"Page 1 of 2\") |> should.be_true
+  string.contains(first, \"href=\\\"" <> path <> "?page=2\\\"\") |> should.be_true
+
+  let second = get(\"" <> path <> "?page=2\", ctx) |> simulate.read_body
+  count_items(second) |> should.equal(1)
+  string.contains(second, \"Page 2 of 2\") |> should.be_true
+  string.contains(second, \"href=\\\"" <> path <> "?page=1\\\"\") |> should.be_true
+
+  // A page number that is not one shows the first page
+  get(\"" <> path <> "?page=-1\", ctx)
+  |> simulate.read_body
+  |> string.contains(\"Page 1 of 2\")
+  |> should.be_true
+}
+
 fn get(path: String, ctx: Context) -> wisp.Response {
   simulate.browser_request(http.Get, path)
   |> router.handle_request(ctx)
+}
+
+/// How many items an index page lists.
+fn count_items(html: String) -> Int {
+  list.length(string.split(html, \"<li>\")) - 1
 }
 
 fn form_values() -> List(#(String, String)) {
@@ -2306,12 +2464,14 @@ fn updated_form_values() -> List(#(String, String)) {
 
   "import gleam/http
 import gleam/http/response
+import gleam/list
 import gleam/string
 import gleeunit/should
 import " <> app_name <> "/config
 import " <> app_name <> "/context.{type Context}
 import " <> app_name <> "/router
 import " <> app_name <> "/support/test_db
+import " <> app_name <> "/web/" <> handler <> "
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form" <> context_imports <> "
 import wisp
 import wisp/simulate

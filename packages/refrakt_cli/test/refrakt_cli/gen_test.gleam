@@ -197,6 +197,19 @@ pub fn gen_resource_creates_all_files_test() {
     file_contains("src/res_app/web/post_views.gleam", "name(\"_method\")")
     |> should.be_false
 
+    // The index shows one page, with links to the others
+    let repo = "src/res_app/data/post_repo.gleam"
+    file_contains(repo, "params: paginate.Params") |> should.be_true
+    file_contains(repo, "LIMIT $1 OFFSET $2") |> should.be_true
+    file_contains(repo, "SELECT COUNT(*) FROM posts") |> should.be_true
+    let handler = "src/res_app/web/post_handler.gleam"
+    file_contains(handler, "pub const per_page = 20") |> should.be_true
+    file_contains(handler, "paginate.page_number(req)") |> should.be_true
+    let views = "src/res_app/web/post_views.gleam"
+    file_contains(views, "pub fn index_view(page: paginate.Page(Post))")
+    |> should.be_true
+    file_contains(views, "paginate.next_page(page)") |> should.be_true
+
     // Tests run against a real database, rolled back after each test
     let test_db = "test/res_app/support/test_db.gleam"
     file_contains(test_db, "pog.transaction") |> should.be_true
@@ -206,6 +219,8 @@ pub fn gen_resource_creates_all_files_test() {
     file_contains(test_file, "use ctx <- test_db.with_context()")
     |> should.be_true
     file_contains(test_file, "pub fn create_show_update_delete_test()")
+    |> should.be_true
+    file_contains(test_file, "pub fn index_is_paginated_test()")
     |> should.be_true
 
     let assert Ok(_) = set_cwd(cwd)
@@ -354,10 +369,22 @@ pub fn gen_api_resource_creates_json_handlers_test() {
     file_contains("src/api_app/router.gleam", "[\"api\", \"notes\", id]")
     |> should.be_true
 
+    // The index answers one page in a JSON envelope
+    file_contains(handler, "paginate.from_request_with(req, per_page:)")
+    |> should.be_true
+    file_contains(handler, "#(\"data\", json.array(page.items, to_json))")
+    |> should.be_true
+    file_contains(handler, "#(\"total_pages\", json.int(page.total_pages))")
+    |> should.be_true
+    file_contains("src/api_app/data/note_repo.gleam", "LIMIT ? OFFSET ?")
+    |> should.be_true
+
     // A fresh in-memory SQLite database per test
     let test_db = "test/api_app/support/test_db.gleam"
     file_contains(test_db, "?mode=memory&cache=shared") |> should.be_true
     file_contains(test_db, "pog") |> should.be_false
+    file_contains(test_file, "pub fn index_is_paginated_test()")
+    |> should.be_true
 
     let assert Ok(_) = set_cwd(cwd)
     Nil

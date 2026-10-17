@@ -11,13 +11,13 @@
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`.
 #      With a database, `gleam test` includes the DB-backed tests that go
 #      through test/app/support/test_db.gleam (create/show/update/delete,
-#      register/login)
+#      pagination, register/login)
 #   5. with a database: `refrakt_cli migrate` (including a hand-written
 #      multi-statement migration and a failing one that must roll back),
 #      check that APP_ENV=prod refuses a missing, development or short
 #      SECRET_KEY_BASE, boot the app and smoke-test /posts, CSRF
-#      rejection, the /api/memos JSON API and the register/login/logout
-#      flow with curl
+#      rejection, the /api/memos JSON API, the register/login/logout
+#      flow and pagination of /posts and /api/memos with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -572,5 +572,111 @@ grep -i "^set-cookie: _session=" "$work/logout.headers" | grep -q "Max-Age=0" ||
 echo "ok  logout clears the session cookie"
 
 smoke_test_json_api
+
+# -----------------------------------------------------------------------------
+# Pagination (#22): /posts and /api/memos list one page at a time. Runs after
+# the smoke tests above, which delete the post and memo they create, so the
+# tables hold only the rows created here.
+# -----------------------------------------------------------------------------
+
+# count_matches <text>: how often text occurs in the last response body
+count_matches() {
+  { grep -oF -- "$1" "$work/body.html" || true; } | wc -l | tr -d ' '
+}
+
+# body_has <text> <what> / body_lacks <text> <what>
+body_has() {
+  grep -qF -- "$1" "$work/body.html" || {
+    cat "$work/body.html" >&2
+    fail "$2: response body lacks $1"
+  }
+}
+body_lacks() {
+  if grep -qF -- "$1" "$work/body.html"; then
+    cat "$work/body.html" >&2
+    fail "$2: response body has $1"
+  fi
+}
+
+# expect_count <want> <text> <what>
+expect_count() {
+  local got
+  got="$(count_matches "$2")"
+  [ "$got" = "$1" ] || {
+    cat "$work/body.html" >&2
+    fail "$3: expected $1 x $2, got $got"
+  }
+  echo "ok  $3: $got x $2"
+}
+
+smoke_test_pagination() {
+  local per_page api_per_page i page
+  per_page="$(grep -o 'pub const per_page = [0-9]*' src/app/web/post_handler.gleam | grep -o '[0-9]*$')"
+  api_per_page="$(grep -o 'pub const per_page = [0-9]*' src/app/web/memo_handler.gleam | grep -o '[0-9]*$')"
+  [ -n "$per_page" ] || fail "no per_page constant in post_handler.gleam"
+  [ -n "$api_per_page" ] || fail "no per_page constant in memo_handler.gleam"
+
+  step "Pagination of /posts ($((per_page + 1)) posts, $per_page per page)"
+  expect 200 "$(status GET /posts)" "GET /posts before creating posts"
+  expect_count 0 "<li>" "GET /posts before creating posts"
+  for i in $(seq 1 $((per_page + 1))); do
+    [ "$(status POST /posts --data-urlencode "title=Paged post $i" \
+      --data-urlencode "body=Body $i")" = 303 ] || fail "POST /posts (paged post $i)"
+  done
+
+  expect 200 "$(status GET /posts)" "GET /posts"
+  expect_count "$per_page" "<li>" "GET /posts"
+  body_has "Page 1 of 2" "GET /posts"
+  body_has 'href="/posts?page=2"' "GET /posts"
+  body_has "Paged post $((per_page + 1))<" "GET /posts (newest first)"
+  body_lacks 'rel="prev"' "GET /posts"
+
+  expect 200 "$(status GET "/posts?page=2")" "GET /posts?page=2"
+  expect_count 1 "<li>" "GET /posts?page=2"
+  body_has "Page 2 of 2" "GET /posts?page=2"
+  body_has "Paged post 1<" "GET /posts?page=2 (oldest last)"
+  body_has 'href="/posts?page=1"' "GET /posts?page=2"
+  body_lacks 'rel="next"' "GET /posts?page=2"
+
+  expect 200 "$(status GET "/posts?page=3")" "GET /posts?page=3 (out of range)"
+  expect_count 0 "<li>" "GET /posts?page=3"
+  body_has 'href="/posts?page=2"' "GET /posts?page=3 (links back to the last page)"
+  body_lacks 'rel="next"' "GET /posts?page=3"
+
+  for page in 0 -1 abc; do
+    expect 200 "$(status GET "/posts?page=$page")" "GET /posts?page=$page"
+    body_has "Page 1 of 2" "GET /posts?page=$page (is page 1)"
+  done
+
+  step "Pagination of /api/memos (3 memos, per_page=2)"
+  for i in 1 2 3; do
+    [ "$(api POST /api/memos \
+      "{\"title\":\"Paged memo $i\",\"body\":\"Body\",\"pinned\":false,\"rating\":$i}")" = 201 ] ||
+      fail "POST /api/memos (paged memo $i)"
+  done
+
+  expect 200 "$(api GET /api/memos)" "GET /api/memos"
+  body_has "\"page\":1,\"per_page\":$api_per_page,\"total\":3,\"total_pages\":1" "GET /api/memos"
+  expect_count 3 '"title":"Paged memo' "GET /api/memos"
+
+  expect 200 "$(api GET "/api/memos?per_page=2")" "GET /api/memos?per_page=2"
+  body_has '"page":1,"per_page":2,"total":3,"total_pages":2' "GET /api/memos?per_page=2"
+  expect_count 2 '"title":"Paged memo' "GET /api/memos?per_page=2"
+  body_has '"title":"Paged memo 3"' "GET /api/memos?per_page=2 (newest first)"
+
+  expect 200 "$(api GET "/api/memos?page=2&per_page=2")" "GET /api/memos?page=2&per_page=2"
+  body_has '"page":2,"per_page":2,"total":3,"total_pages":2' "GET /api/memos?page=2&per_page=2"
+  expect_count 1 '"title":"Paged memo' "GET /api/memos?page=2&per_page=2"
+  body_has '"title":"Paged memo 1"' "GET /api/memos?page=2&per_page=2"
+
+  expect 200 "$(api GET "/api/memos?page=3&per_page=2")" "GET /api/memos?page=3&per_page=2 (out of range)"
+  body_has '"data":[]' "GET /api/memos?page=3&per_page=2"
+  body_has '"page":3' "GET /api/memos?page=3&per_page=2"
+
+  expect 200 "$(api GET "/api/memos?page=-4&per_page=1000")" "GET /api/memos?page=-4&per_page=1000"
+  body_has "\"page\":1,\"per_page\":100,\"total\":3" "GET /api/memos?page=-4&per_page=1000 (clamped)"
+}
+
+smoke_test_pagination
 
 step "OK ($db)"
