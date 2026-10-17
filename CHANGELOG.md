@@ -6,13 +6,26 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-17
+
+The first release on Hex since 0.2.0. Versions 0.3.0 and 0.4.0 were
+tagged but never reached Hex, so everything listed under them ships
+here, including the Upgrading notes in 0.4.0.
+
 ### Added
 
 - `validate` gained `email`, `int_between`, `float_between` and
   `confirmation`, so forms no longer hand-write those checks. `email` is a
   pragmatic check (one `@`, non-empty local part, dotted domain), the range
   checks fail on values that do not parse as a number, and `confirmation`
-  compares two values without trimming them (#24).
+  compares two values without trimming them. Thanks to @ElectLive (#24, #29).
+
+### Fixed
+
+- The release workflow passed without publishing: Gleam asks for a
+  typed confirmation on 0.x versions even with `--yes`, and printed
+  "Not publishing." with exit status 0. Publishing now answers the
+  prompt and fails if Gleam refuses.
 
 ## [0.4.0] - 2026-10-17
 
@@ -149,7 +162,8 @@ Generated code belongs to your app, so existing projects need these edits by han
 - Library helpers for validation, flash messages, migrations and testing.
 - Documentation, tutorial and examples.
 
-[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/raskell-io/refrakt/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/raskell-io/refrakt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/raskell-io/refrakt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/raskell-io/refrakt/compare/v0.1.0...v0.2.0
