@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `validate` gained `email`, `int_between`, `float_between` and
+  `confirmation`, so forms no longer hand-write those checks. `email` is a
+  pragmatic check (one `@`, non-empty local part, dotted domain), the range
+  checks fail on values that do not parse as a number, and `confirmation`
+  compares two values without trimming them (#24).
+
 ## [0.4.0] - 2026-10-17
 
 ### Upgrading

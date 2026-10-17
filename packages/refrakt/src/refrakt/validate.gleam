@@ -14,6 +14,8 @@
 //// ```
 ////
 
+import gleam/float
+import gleam/int
 import gleam/list
 import gleam/string
 
@@ -39,7 +41,7 @@ pub fn min_length(
   min: Int,
   message: String,
 ) -> List(#(String, String)) {
-  case list.any(errors, fn(e) { e.0 == field }) {
+  case has_error(errors, field) {
     True -> errors
     False ->
       case string.length(string.trim(value)) < min {
@@ -58,12 +60,107 @@ pub fn max_length(
   max: Int,
   message: String,
 ) -> List(#(String, String)) {
-  case list.any(errors, fn(e) { e.0 == field }) {
+  case has_error(errors, field) {
     True -> errors
     False ->
       case string.length(string.trim(value)) > max {
         True -> [#(field, message), ..errors]
         False -> errors
+      }
+  }
+}
+
+/// Check that a string looks like an email address.
+///
+/// This is a pragmatic check, not a RFC 5322 parser: the trimmed value must
+/// contain exactly one `@`, a non-empty local part without spaces, and a
+/// domain with at least two non-empty dot-separated labels. So
+/// `"jane@example.com"` passes, while `"jane"`, `"jane@"`, `"@example.com"`,
+/// `"jane@example"` and `"jane@example..com"` fail.
+///
+/// Use it after `required` so that an empty field reports the "required"
+/// message instead of the email message.
+pub fn email(
+  errors: List(#(String, String)),
+  value: String,
+  field: String,
+  message: String,
+) -> List(#(String, String)) {
+  case is_email(value) {
+    True -> errors
+    False -> [#(field, message), ..errors]
+  }
+}
+
+/// Check that a string parses as an integer between `min` and `max`,
+/// inclusive on both ends. A value that does not parse as an integer fails
+/// the check with the same message.
+/// Skips the check if the field already has an error.
+pub fn int_between(
+  errors: List(#(String, String)),
+  value: String,
+  field: String,
+  min: Int,
+  max: Int,
+  message: String,
+) -> List(#(String, String)) {
+  case has_error(errors, field) {
+    True -> errors
+    False ->
+      case int.parse(string.trim(value)) {
+        Error(_) -> [#(field, message), ..errors]
+        Ok(number) ->
+          case number >= min && number <= max {
+            True -> errors
+            False -> [#(field, message), ..errors]
+          }
+      }
+  }
+}
+
+/// Check that a string parses as a float between `min` and `max`, inclusive
+/// on both ends. A value that does not parse as a number fails the check with
+/// the same message.
+/// Skips the check if the field already has an error.
+pub fn float_between(
+  errors: List(#(String, String)),
+  value: String,
+  field: String,
+  min: Float,
+  max: Float,
+  message: String,
+) -> List(#(String, String)) {
+  case has_error(errors, field) {
+    True -> errors
+    False ->
+      case float.parse(string.trim(value)) {
+        Error(_) -> [#(field, message), ..errors]
+        Ok(number) ->
+          case number >=. min && number <=. max {
+            True -> errors
+            False -> [#(field, message), ..errors]
+          }
+      }
+  }
+}
+
+/// Check that `value` equals `confirmation`, for password and password-repeat
+/// fields. The two values are compared as given: no trimming, because
+/// passwords may legitimately start or end with a space.
+/// Skips the check if the field already has an error.
+pub fn confirmation(
+  errors: List(#(String, String)),
+  value: String,
+  confirmation: String,
+  field: String,
+  message: String,
+) -> List(#(String, String)) {
+  case has_error(errors, field) {
+    True -> errors
+    False ->
+      case value == confirmation {
+        True -> errors
+        False -> [#(field, message), ..errors]
       }
   }
 }
@@ -93,5 +190,28 @@ pub fn format(
   case predicate(value) {
     True -> errors
     False -> [#(field, message), ..errors]
+  }
+}
+
+fn has_error(errors: List(#(String, String)), field: String) -> Bool {
+  list.any(errors, fn(e) { e.0 == field })
+}
+
+fn is_email(value: String) -> Bool {
+  case string.split(string.trim(value), "@") {
+    [local, domain] ->
+      case string.is_empty(local) || string.contains(local, " ") {
+        True -> False
+        False -> is_domain(domain)
+      }
+    _ -> False
+  }
+}
+
+fn is_domain(domain: String) -> Bool {
+  let labels = string.split(domain, ".")
+  case list.length(labels) > 1 {
+    False -> False
+    True -> list.all(labels, fn(label) { !string.is_empty(label) })
   }
 }
