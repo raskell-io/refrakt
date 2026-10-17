@@ -52,18 +52,32 @@ fail() {
   exit 1
 }
 
-# Hex occasionally rate-limits or times out; retry downloads a few times.
-deps_download() {
-  local attempt
-  for attempt in 1 2 3 4; do
-    if gleam deps download; then return 0; fi
-    echo "gleam deps download failed (attempt $attempt), retrying..." >&2
-    sleep $((attempt * 10))
+# Run gleam, retrying when Hex rejects or fails the dependency resolution.
+# Projects with path dependencies resolve versions on most commands, so the
+# unauthenticated Hex API rate limit can hit any of them. Resolution happens
+# before anything runs, so retrying never repeats a generator.
+gleam_hex() {
+  local attempt log
+  log="$(mktemp)"
+  for attempt in 1 2 3 4 5; do
+    if gleam "$@" 2>&1 | tee "$log"; then
+      rm -f "$log"
+      return 0
+    fi
+    if ! grep -q "Hex API" "$log"; then
+      rm -f "$log"
+      return 1
+    fi
+    echo "Hex API error (attempt $attempt), retrying..." >&2
+    sleep $((attempt * 15))
   done
+  rm -f "$log"
   return 1
 }
 
-cli() { gleam run --no-print-progress -m refrakt_cli -- "$@"; }
+deps_download() { gleam_hex deps download; }
+
+cli() { gleam_hex run --no-print-progress -m refrakt_cli -- "$@"; }
 
 rm -rf "$app_dir"
 
@@ -110,8 +124,8 @@ fi
 cli routes
 
 step "Build, test, format"
-gleam build --warnings-as-errors
-gleam test
+gleam_hex build --warnings-as-errors
+gleam_hex test
 gleam format --check src test
 
 if [ "$db" = none ] || [ "${SKIP_RUNTIME:-}" = 1 ]; then
@@ -136,7 +150,7 @@ echo "$migrate_output"
 echo "$migrate_output" | grep -q "migration(s) applied" || fail "migrate did not apply migrations"
 
 step "Booting the app on port $port"
-gleam export erlang-shipment > /dev/null
+gleam_hex export erlang-shipment > /dev/null
 log="$work/server.log"
 PORT="$port" ./build/erlang-shipment/entrypoint.sh run > "$log" 2>&1 &
 server_pid=$!
