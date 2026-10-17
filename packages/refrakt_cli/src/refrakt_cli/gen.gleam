@@ -69,8 +69,19 @@ pub fn placeholder_test() {
 // =============================================================================
 
 pub fn resource(name: String, raw_args: List(String)) {
+  case project.detect_db() {
+    NoDb -> {
+      io.println("No database configured.")
+      io.println(
+        "gen resource generates a repo and a migration. Create a project with --db postgres or --db sqlite.",
+      )
+    }
+    db -> resource_with_db(name, raw_args, db)
+  }
+}
+
+fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   let app = project.app_name()
-  let db = project.detect_db()
   let api_mode = list.contains(raw_args, "--api")
   let belongs_to = extract_flag_value(raw_args, "--belongs-to")
   let raw_fields = list.filter(raw_args, fn(a) { !string.starts_with(a, "--") })

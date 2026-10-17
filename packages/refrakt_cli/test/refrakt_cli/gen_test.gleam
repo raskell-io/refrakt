@@ -186,6 +186,26 @@ pub fn gen_resource_creates_all_files_test() {
   })
 }
 
+pub fn gen_resource_without_db_writes_nothing_test() {
+  in_temp_dir("gen_resource_no_db", fn(dir) {
+    let project_dir = dir <> "/plain_app"
+    new.run(project_dir, [])
+
+    let assert Ok(cwd) = current_directory()
+    let assert Ok(_) = set_cwd(project_dir)
+
+    gen.resource("posts", ["title:string"])
+
+    file_exists("src/plain_app/web/post_handler.gleam") |> should.be_false
+    file_exists("src/plain_app/data/post_repo.gleam") |> should.be_false
+    file_contains("src/plain_app/router.gleam", "post_handler")
+    |> should.be_false
+
+    let assert Ok(_) = set_cwd(cwd)
+    Nil
+  })
+}
+
 pub fn gen_two_resources_no_duplication_test() {
   in_temp_dir("gen_two", fn(dir) {
     let project_dir = dir <> "/two_app"
