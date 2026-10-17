@@ -4,7 +4,7 @@ import gleam/option
 import lustre/attribute.{class, href, name, type_, value}
 import lustre/element.{type Element, text}
 import lustre/element/html.{
-  a, button, div, form, h1, input, label, li, p, section, textarea, ul,
+  a, button, div, form, h1, input, label, li, p, section, ul,
 }
 import tasks_app/domain/task.{type Task}
 import tasks_app/web/forms/task_form
@@ -39,6 +39,17 @@ pub fn show_view(item: Task) -> Element(Nil) {
         ],
         [text("Edit")],
       ),
+      // wisp.method_override reads the method from the _method query
+      // parameter of a POST, so this form sends a DELETE.
+      form(
+        [
+          attribute.action(
+            "/tasks/" <> int.to_string(item.id) <> "?_method=DELETE",
+          ),
+          attribute.method("post"),
+        ],
+        [button([type_("submit"), class("btn")], [text("Delete")])],
+      ),
     ]),
   ])
 }
@@ -47,8 +58,10 @@ pub fn form_view(
   values: task_form.TaskForm,
   errors: List(#(String, String)),
 ) -> Element(Nil) {
+  // Updates are sent as POST /<id>?_method=PUT: wisp.method_override
+  // reads the method from the _method query parameter.
   let post_action = case values.id {
-    option.Some(id) -> "/tasks/" <> int.to_string(id)
+    option.Some(id) -> "/tasks/" <> int.to_string(id) <> "?_method=PUT"
     option.None -> "/tasks"
   }
 
@@ -60,11 +73,6 @@ pub fn form_view(
       }),
     ]),
     form([attribute.action(post_action), attribute.method("post")], [
-      case values.id {
-        option.Some(_) ->
-          input([type_("hidden"), name("_method"), value("put")])
-        option.None -> text("")
-      },
       div([class("field")], [
         label([], [text("Title")]),
         input([type_("text"), name("title"), value(values.title)]),
