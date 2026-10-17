@@ -1,5 +1,5 @@
 name = "refrakt_cli"
-version = "0.4.1"
+version = "0.5.0"
 target = "erlang"
 description = "Code generator for Refrakt, a convention-first web framework for Gleam"
 licences = ["MIT"]
