@@ -8,7 +8,7 @@ Commands, processes, and common tasks for working on Refrakt.
 
 ### Prerequisites
 
-- Gleam 1.14+ (via mise)
+- Gleam 1.14+ (via mise; the repo pins 1.19)
 - Erlang/OTP 27+ (via mise)
 - rebar3 (via mise)
 
@@ -16,48 +16,55 @@ Commands, processes, and common tasks for working on Refrakt.
 
 ```bash
 mise install
-gleam build
-gleam test
+mise run build   # both packages
+mise run test    # both packages
 ```
+
+The repository holds two Gleam packages. Run `gleam` inside one of them:
+
+| Directory | Package |
+|-----------|---------|
+| `packages/refrakt` | runtime library |
+| `packages/refrakt_cli` | code generator |
 
 ---
 
 ## Common Commands
 
+Run these in `packages/refrakt` or `packages/refrakt_cli`, or use the
+`mise run` task that loops over both.
+
 ### Building
 
 ```bash
-# Build all packages
-gleam build
+# Build (warnings fail the build, as in CI)          mise run build
+gleam build --warnings-as-errors
 
-# Check types without full build
+# Check types without full build                     mise run check
 gleam check
 ```
 
 ### Testing
 
 ```bash
-# Run all tests
+# Run all tests                                      mise run test
 gleam test
-
-# Run with output
-gleam test -- --nocapture
 ```
 
 ### Formatting
 
 ```bash
-# Format all code
-gleam format
+# Format all code                                    mise run fmt
+gleam format src test
 
-# Check formatting (CI)
-gleam format --check
+# Check formatting (CI)                              mise run fmt:check
+gleam format --check src test
 ```
 
 ### Documentation
 
 ```bash
-# Generate docs
+# Generate docs                                      mise run doc
 gleam docs build
 
 # Open in browser
@@ -71,26 +78,48 @@ gleam docs build --open
 ### Running CLI Commands Locally
 
 ```bash
-# Test `refrakt new`
-gleam run -m refrakt_cli -- new test_app
+cd packages/refrakt_cli
 
-# Test `refrakt gen resource`
-cd test_app
+# Test `refrakt_cli new`
+gleam run -m refrakt_cli -- new /tmp/test_app --db sqlite
+```
+
+A generated app depends on `refrakt` and `refrakt_cli` from Hex. To run
+generators against your working copy, point both at the repo with path
+dependencies in the app's `gleam.toml`:
+
+```toml
+[dependencies]
+refrakt = { path = "/path/to/refrakt/packages/refrakt" }
+
+[dev-dependencies]
+refrakt_cli = { path = "/path/to/refrakt/packages/refrakt_cli" }
+```
+
+```bash
+cd /tmp/test_app
 gleam run -m refrakt_cli -- gen resource posts title:string body:text published:bool
-
-# Test `refrakt gen page`
 gleam run -m refrakt_cli -- gen page about
 ```
 
 ### Testing Generated Output
 
+`.github/scripts/test-generated-app.sh` does all of this (it is what CI
+runs):
+
+```bash
+mise exec -- .github/scripts/test-generated-app.sh none
+mise exec -- .github/scripts/test-generated-app.sh sqlite
+SKIP_RUNTIME=1 mise exec -- .github/scripts/test-generated-app.sh postgres
+```
+
 After running a generator, verify:
 
-1. `gleam build` compiles without errors
+1. `gleam build --warnings-as-errors` compiles without errors
 2. `gleam test` passes
 3. Generated files follow conventions (check against `rules/conventions.md`)
 4. Router patch is correct (routes before catch-all)
-5. `gleam format --check` passes on generated code
+5. `gleam format --check src test` passes on generated code
 
 ---
 
@@ -149,29 +178,48 @@ All composable, return List(#(String, String)) errors.
 ### Pre-commit Checklist
 
 ```bash
-gleam format
-gleam build
-gleam test
+mise run fmt
+mise run build
+mise run test
 ```
 
 ---
 
 ## Release Process
 
+Both packages share one version number and are released together.
+
 ### Version Bump
 
-1. Update version in `gleam.toml` for both packages
-2. Update `CHANGELOG.md`
-3. Commit: `chore: bump version to X.Y.Z`
-4. Tag: `git tag vX.Y.Z`
-5. Push: `git push && git push --tags`
+1. Update `version` in `packages/refrakt/gleam.toml` and
+   `packages/refrakt_cli/gleam.toml`
+2. Update the version printed by `refrakt_cli version`
+   (`packages/refrakt_cli/src/refrakt_cli.gleam`) and, for a new minor
+   version, the `refrakt`/`refrakt_cli` requirements in the generated
+   `gleam.toml` (`templates.gleam_toml`)
+3. Update `CHANGELOG.md`: rename `## [Unreleased]` to
+   `## [X.Y.Z] - YYYY-MM-DD`, add a fresh `## [Unreleased]`, fix the
+   compare links at the bottom
+4. Commit: `chore: bump version to X.Y.Z`
+5. Tag: `git tag vX.Y.Z`
+6. Push: `git push && git push --tags`
 
-### Publishing to Hex
+### Publishing
+
+Pushing the tag runs `.github/workflows/release.yml`, which:
+
+1. Fails unless the tag matches both package versions, the CLI version
+   string and a `CHANGELOG.md` section
+2. Runs format check, build and tests for both packages
+3. Publishes `packages/refrakt`, then `packages/refrakt_cli`, with
+   `gleam publish --yes` (needs the `HEXPM_API_KEY` repository secret)
+4. Creates the GitHub release with the changelog section as notes
+
+Do not publish by hand unless the workflow is broken. If you must:
 
 ```bash
-# Publish library first (CLI depends on it)
 cd packages/refrakt && gleam publish
-cd packages/refrakt_cli && gleam publish
+cd ../refrakt_cli && gleam publish
 ```
 
 ---
@@ -182,14 +230,13 @@ cd packages/refrakt_cli && gleam publish
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `ci.yml` | Push, PR | Build, test, format check |
-| `release.yml` | Tag push | Publish to Hex |
+| `ci.yml` | Push, PR | Per package: format, build, test, docs. Generated apps (none/sqlite/postgres): build, test, format, migrate, boot, curl. Examples: build, test |
+| `release.yml` | Tag push (`v*`) | Verify versions, test, publish both packages to Hex, GitHub release |
 
 ### Local CI Simulation
 
 ```bash
-gleam format --check
-gleam build
-gleam test
-gleam docs build
+mise run ci
+mise exec -- .github/scripts/test-generated-app.sh sqlite
+mise run test:examples
 ```
