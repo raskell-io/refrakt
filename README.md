@@ -254,15 +254,17 @@ Generated apps depend on the small [`refrakt`](packages/refrakt) library at runt
 | `refrakt/migrate` | Runs SQL migration files and tracks them in a `_migrations` table |
 | `refrakt/testing` | Request builders for handler tests |
 | `refrakt/dev_error` | Development error page |
-| `refrakt/jobs` | Background jobs in OTP processes, with a concurrency limit |
+| `refrakt/jobs` | Background jobs in OTP processes, with a concurrency limit *(experimental)* |
 | `refrakt/token` | Signed, expiring tokens bound to a purpose |
-| `refrakt/mailer` | Email builder with pluggable delivery adapters |
+| `refrakt/mailer` | Email builder with pluggable delivery adapters *(experimental)* |
 | `refrakt/paginate` | Pagination helpers for list views |
 | `refrakt/upload` | Multipart file upload handling |
-| `refrakt/cors` | CORS middleware |
-| `refrakt/rate_limit` | Sliding-window rate-limiting middleware |
-| `refrakt/pubsub` | Topic-based publish/subscribe |
-| `refrakt/telemetry` | Request counts, response times and error rates |
+| `refrakt/cors` | CORS middleware *(experimental)* |
+| `refrakt/rate_limit` | Sliding-window rate-limiting middleware *(experimental)* |
+| `refrakt/pubsub` | Topic-based publish/subscribe *(experimental)* |
+| `refrakt/telemetry` | Request counts, response times and error rates *(experimental)* |
+
+Modules marked *experimental* are lightly used and may change or move to their own package ([#28](https://github.com/raskell-io/refrakt/issues/28)).
 
 API docs: [hexdocs.pm/refrakt](https://hexdocs.pm/refrakt).
 

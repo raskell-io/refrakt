@@ -8,6 +8,29 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [0.4.0] - 2026-10-17
 
+### Upgrading
+
+Generated code belongs to your app, so existing projects need these edits by hand:
+
+- **CLI:** `gleam add --dev refrakt_cli`, then run generators with
+  `gleam run -m refrakt_cli -- <command>`. Bump `refrakt` to
+  `>= 0.4.0 and < 1.0.0`.
+- **Router:** change `middleware(req)` to `middleware(req, ctx)` and
+  replace `use <- dev_error.rescue(req)` with a `rescue_crashes` helper
+  that only uses `dev_error.rescue` when `ctx.config.env` is `Dev` and
+  `wisp.rescue_crashes` otherwise. Compare with a freshly generated
+  `router.gleam`. Set `APP_ENV=prod` in production.
+- **Auth:** `gleam add argus`, then port `domain/auth.gleam` and the
+  register handler from a freshly generated app (`hash_password` now
+  returns a `Result`). Stored SHA-256 hashes will not verify; users need
+  a password reset.
+- **Edit forms:** post to `?_method=PUT` instead of sending `_method`
+  as a hidden field.
+- **Postgres repo:** read `DATABASE_URL` and include a user in the
+  default URL (`postgres://postgres@localhost:5432/<app>_dev`).
+- **`rate_limit.check`:** pass `key: rate_limit.by_forwarded_for(trusted_proxies: 1)`
+  or `key: rate_limit.by_header("cf-connecting-ip")` to match your proxy.
+
 ### Changed
 
 - **Breaking:** the CLI is now its own package, `refrakt_cli`, and is no
