@@ -6,27 +6,110 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  OTP_VERSION: "27"
+  GLEAM_VERSION: "1.19"
+  REBAR3_VERSION: "3"
+
 jobs:
-  build:
+  package:
+    name: ${{ matrix.package }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [refrakt, refrakt_cli]
+    defaults:
+      run:
+        working-directory: packages/${{ matrix.package }}
 
     steps:
       - uses: actions/checkout@v7
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "27"
-          gleam-version: "1.19"
-          rebar3-version: "3"
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
 
       - name: Check formatting
-        run: gleam format --check
+        run: gleam format --check src test
+
+      - name: Download dependencies
+        run: gleam deps download || (sleep 15 && gleam deps download)
 
       - name: Build
-        run: gleam build
+        run: gleam build --warnings-as-errors
 
       - name: Test
         run: gleam test
 
       - name: Docs
         run: gleam docs build
+
+  generated:
+    name: generated app (${{ matrix.db }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [none, sqlite, postgres]
+
+    services:
+      # Only the postgres leg uses it, but services cannot be conditional.
+      # The generated repo connects to postgres://postgres@localhost:5432/app_dev.
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+
+      - name: Generate, build, test and smoke-test an app
+        run: .github/scripts/test-generated-app.sh ${{ matrix.db }} "$RUNNER_TEMP/generated"
+
+  examples:
+    name: example (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [blog, tasks_app]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.example }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+
+      - name: Check formatting
+        run: gleam format --check src test
+
+      - name: Download dependencies
+        run: gleam deps download || (sleep 15 && gleam deps download)
+
+      - name: Build
+        run: gleam build --warnings-as-errors
+
+      - name: Test
+        run: gleam test
