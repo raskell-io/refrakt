@@ -91,6 +91,14 @@ pub fn new_with_postgres_creates_repo_test() {
     file_contains(project_dir <> "/gleam.toml", "pog") |> should.be_true
     file_contains(project_dir <> "/src/pg_app/context.gleam", "pog.Connection")
     |> should.be_true
+    // pog.url_config rejects URLs without a user, so the default must have one
+    file_contains(
+      project_dir <> "/src/pg_app/data/repo.gleam",
+      "postgres://postgres@localhost:5432/pg_app_dev",
+    )
+    |> should.be_true
+    file_contains(project_dir <> "/src/pg_app/data/repo.gleam", "DATABASE_URL")
+    |> should.be_true
   })
 }
 

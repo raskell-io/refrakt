@@ -322,15 +322,20 @@ pub fn render(message: Option(String)) -> Element(Nil) {
 pub fn repo_module(name: String, db: DbChoice) -> String {
   case db {
     Postgres -> "import " <> name <> "/config.{type Config}
+import envoy
 import gleam/erlang/process
 import gleam/result
 import pog
 
+/// Connect to PostgreSQL. The connection URL comes from `DATABASE_URL`;
+/// without it, development and test use a local server as the
+/// `postgres` user.
 pub fn connect(cfg: Config) -> Result(pog.Connection, Nil) {
-  let db_url = case cfg.env {
-    config.Test -> \"postgres://localhost:5432/" <> name <> "_test\"
-    _ -> \"postgres://localhost:5432/" <> name <> "_dev\"
+  let default_url = case cfg.env {
+    config.Test -> \"postgres://postgres@localhost:5432/" <> name <> "_test\"
+    _ -> \"postgres://postgres@localhost:5432/" <> name <> "_dev\"
   }
+  let db_url = envoy.get(\"DATABASE_URL\") |> result.unwrap(default_url)
 
   let pool_name = process.new_name(prefix: \"" <> name <> "_db\")
   use db_config <- result.try(pog.url_config(pool_name, db_url))
