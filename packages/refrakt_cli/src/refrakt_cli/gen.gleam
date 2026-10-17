@@ -850,13 +850,20 @@ fn resource_views(
     False -> ""
   }
 
+  // textarea is only used by `text` fields; importing it otherwise
+  // would leave an unused-import warning in the generated module.
+  let textarea_import = case list.any(fields, fn(f) { f.1 == "text" }) {
+    True -> " textarea,"
+    False -> ""
+  }
+
   "import gleam/int" <> float_import <> "
 import gleam/list
 import gleam/option
 import lustre/attribute.{class, href, name, type_, value}
 import lustre/element.{type Element, text}
 import lustre/element/html.{
-  a, button, div, form, h1, input, label, li, p, section, textarea, ul,
+  a, button, div, form, h1, input, label, li, p, section," <> textarea_import <> " ul,
 }
 import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form

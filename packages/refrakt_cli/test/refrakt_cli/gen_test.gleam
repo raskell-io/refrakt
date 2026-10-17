@@ -214,6 +214,27 @@ pub fn gen_resource_without_db_writes_nothing_test() {
   })
 }
 
+pub fn gen_resource_imports_textarea_only_for_text_fields_test() {
+  in_temp_dir("gen_textarea", fn(dir) {
+    let project_dir = dir <> "/ta_app"
+    new.run(project_dir, ["--db", "sqlite"])
+
+    let assert Ok(cwd) = current_directory()
+    let assert Ok(_) = set_cwd(project_dir)
+
+    gen.resource("tasks", ["title:string", "completed:bool"])
+    gen.resource("notes", ["body:text"])
+
+    file_contains("src/ta_app/web/task_views.gleam", "textarea")
+    |> should.be_false
+    file_contains("src/ta_app/web/note_views.gleam", "textarea")
+    |> should.be_true
+
+    let assert Ok(_) = set_cwd(cwd)
+    Nil
+  })
+}
+
 pub fn gen_two_resources_no_duplication_test() {
   in_temp_dir("gen_two", fn(dir) {
     let project_dir = dir <> "/two_app"
