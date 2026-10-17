@@ -97,6 +97,9 @@ if [ "$db" = none ]; then
     fail "gen resource without a database wrote files"
 else
   cli gen resource posts title:string body:text published:bool
+  # Field mixes that change the generated imports (warnings fail the build)
+  cli gen resource notes body:text
+  cli gen resource tasks title:string done:bool priority:int ratio:float
 fi
 cli gen page about
 if [ "$db" != none ]; then
@@ -188,6 +191,23 @@ expect 200 "$(status GET /posts)" "GET /posts after create"
 grep -q "Hello from CI" "$work/body.html" || fail "created post missing from /posts"
 expect 422 "$(status POST /posts --data-urlencode "title=" --data-urlencode "body=")" \
   "POST /posts with invalid form"
+expect 200 "$(status GET /posts)" "GET /posts"
+post_path="$(grep -o 'href="/posts/[0-9]*"' "$work/body.html" | head -n 1 | sed 's/href="\(.*\)"/\1/')"
+[ -n "$post_path" ] || fail "no link to the created post on /posts"
+expect 200 "$(status GET "$post_path")" "GET $post_path"
+# wisp.method_override reads _method from the query string of a POST
+grep -q "$post_path?_method=DELETE" "$work/body.html" ||
+  fail "show page has no delete form posting to ?_method=DELETE"
+expect 200 "$(status GET "$post_path/edit")" "GET $post_path/edit"
+grep -q "$post_path?_method=PUT" "$work/body.html" ||
+  fail "edit form does not post to ?_method=PUT"
+expect 303 "$(status POST "$post_path?_method=PUT" \
+  --data-urlencode "title=Updated in CI" \
+  --data-urlencode "body=Still booted")" "PUT $post_path (method override)"
+expect 200 "$(status GET "$post_path")" "GET $post_path after update"
+grep -q "Updated in CI" "$work/body.html" || fail "update did not change the post"
+expect 303 "$(status POST "$post_path?_method=DELETE")" "DELETE $post_path (method override)"
+expect 404 "$(status GET "$post_path")" "GET $post_path after delete"
 
 email="ci-$$@example.com"
 expect 200 "$(status GET /register)" "GET /register"
