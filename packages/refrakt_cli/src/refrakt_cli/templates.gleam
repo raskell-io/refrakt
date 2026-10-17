@@ -36,7 +36,7 @@ refrakt = \">= 0.5.0 and < 1.0.0\"" <> db_dep <> "
 
 [dev-dependencies]
 gleeunit = \">= 1.11.0 and < 2.0.0\"
-refrakt_cli = \">= 0.4.0 and < 1.0.0\"
+refrakt_cli = \">= 0.5.0 and < 1.0.0\"
 "
 }
 

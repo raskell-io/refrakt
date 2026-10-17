@@ -6,6 +6,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-17
+
+Milestone 0.5, "safe to put in front of users": CSRF protection,
+hardened sessions, safer production defaults, working Postgres
+migrations and a finished JSON API mode. Read **Upgrading** before
+bumping an existing app.
+
 ### Upgrading
 
 - **Migrations:** delete `src/<app>/migrate.gleam` and run
@@ -15,7 +22,8 @@ uses [Semantic Versioning](https://semver.org/).
   transaction. `refrakt migrate` prints a warning while the old module
   is still in place. If you changed your `migrate.gleam`, compare it
   with the regenerated one and carry your changes over.
-- **Dependencies:** bump `refrakt` to `>= 0.5.0 and < 1.0.0`.
+- **Dependencies:** bump `refrakt` to `>= 0.5.0 and < 1.0.0` and the
+  `refrakt_cli` dev-dependency to `>= 0.5.0 and < 1.0.0`.
 - **Router (CSRF):** add `import refrakt/csrf` and `use req <- csrf.protect(req)`
   to `middleware`, after `rescue_crashes`. Make sure GET handlers have no side
   effects, that your reverse proxy forwards the original `Host` header, and
@@ -260,7 +268,8 @@ Generated code belongs to your app, so existing projects need these edits by han
 - Library helpers for validation, flash messages, migrations and testing.
 - Documentation, tutorial and examples.
 
-[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/raskell-io/refrakt/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/raskell-io/refrakt/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/raskell-io/refrakt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/raskell-io/refrakt/compare/v0.2.0...v0.3.0
