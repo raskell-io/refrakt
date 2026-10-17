@@ -1,9 +1,12 @@
 name = "refrakt"
 version = "0.3.0"
 target = "erlang"
-description = "A convention-first web framework for Gleam"
+description = "Runtime helpers for Refrakt, a convention-first web framework for Gleam"
 licences = ["MIT"]
-repository = { type = "github", user = "raskell-io", repo = "refrakt" }
+repository = { type = "github", user = "raskell-io", repo = "refrakt", path = "packages/refrakt" }
+links = [
+  { title = "Guides", href = "https://github.com/raskell-io/refrakt/tree/main/docs" },
+]
 gleam = ">= 1.14.0"
 
 [dependencies]
@@ -14,8 +17,6 @@ gleam_http = ">= 4.5.0 and < 5.0.0"
 gleam_crypto = ">= 1.6.0 and < 2.0.0"
 wisp = ">= 2.2.2 and < 3.0.0"
 lustre = ">= 5.7.0 and < 6.0.0"
-argv = ">= 1.1.0 and < 2.0.0"
-tom = ">= 2.1.0 and < 3.0.0"
 simplifile = ">= 2.7.0 and < 3.0.0"
 exception = ">= 2.1.1 and < 3.0.0"
 
