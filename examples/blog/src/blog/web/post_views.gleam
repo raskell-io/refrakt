@@ -39,6 +39,17 @@ pub fn show_view(item: Post) -> Element(Nil) {
         ],
         [text("Edit")],
       ),
+      // wisp.method_override reads the method from the _method query
+      // parameter of a POST, so this form sends a DELETE.
+      form(
+        [
+          attribute.action(
+            "/posts/" <> int.to_string(item.id) <> "?_method=DELETE",
+          ),
+          attribute.method("post"),
+        ],
+        [button([type_("submit"), class("btn")], [text("Delete")])],
+      ),
     ]),
   ])
 }
@@ -47,8 +58,10 @@ pub fn form_view(
   values: post_form.PostForm,
   errors: List(#(String, String)),
 ) -> Element(Nil) {
+  // Updates are sent as POST /<id>?_method=PUT: wisp.method_override
+  // reads the method from the _method query parameter.
   let post_action = case values.id {
-    option.Some(id) -> "/posts/" <> int.to_string(id)
+    option.Some(id) -> "/posts/" <> int.to_string(id) <> "?_method=PUT"
     option.None -> "/posts"
   }
 
@@ -60,11 +73,6 @@ pub fn form_view(
       }),
     ]),
     form([attribute.action(post_action), attribute.method("post")], [
-      case values.id {
-        option.Some(_) ->
-          input([type_("hidden"), name("_method"), value("put")])
-        option.None -> text("")
-      },
       div([class("field")], [
         label([], [text("Title")]),
         input([type_("text"), name("title"), value(values.title)]),

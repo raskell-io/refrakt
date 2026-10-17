@@ -6,8 +6,10 @@ about page — all running on Gleam.
 
 **Prerequisites:**
 - Gleam 1.14+ and Erlang/OTP 27+
-- PostgreSQL running locally
-- `refrakt` published on Hex (or use a path dependency for now)
+- PostgreSQL running locally, accepting connections as the `postgres`
+  user (or set `DATABASE_URL`)
+- The `refrakt` alias from [Installation](installation.md#a-shorter-command):
+  `alias refrakt='gleam run -m refrakt_cli --'`
 
 **Time:** ~10 minutes
 
@@ -15,10 +17,20 @@ about page — all running on Gleam.
 
 ## 1. Create the project
 
+The CLI runs from inside a Gleam project, so bootstrap the first app from
+a throwaway one (see [Installation](installation.md#create-your-first-project)):
+
 ```bash
-refrakt new blog --db postgres
-cd blog
+gleam new refrakt_bootstrap
+cd refrakt_bootstrap
+gleam add --dev refrakt_cli
+refrakt new ../blog --db postgres
+cd ../blog
+rm -rf ../refrakt_bootstrap
 ```
+
+The new app lists `refrakt_cli` as a dev-dependency, so every `refrakt`
+command from here on runs inside `blog/`.
 
 This creates a complete project structure:
 
@@ -54,8 +66,9 @@ gleam test
 createdb blog_dev
 ```
 
-The generated `repo.gleam` connects to `postgres://localhost:5432/blog_dev`
-by default. No configuration needed for local development.
+The generated `repo.gleam` connects to
+`postgres://postgres@localhost:5432/blog_dev` by default, or to
+`DATABASE_URL` when it is set.
 
 ## 3. Generate a posts resource
 

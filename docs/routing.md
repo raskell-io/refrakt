@@ -70,18 +70,22 @@ Note: `["posts", "new"]` comes before `["posts", id]` so the literal
 ## Method override
 
 HTML forms only support GET and POST. To send PUT and DELETE, Refrakt
-uses method override — a hidden form field `_method`:
+uses method override — a POST with a `_method` query parameter:
 
 ```html
-<form method="post" action="/posts/42">
-  <input type="hidden" name="_method" value="put">
+<form method="post" action="/posts/42?_method=PUT">
   <!-- form fields -->
+</form>
+
+<form method="post" action="/posts/42?_method=DELETE">
+  <button type="submit">Delete</button>
 </form>
 ```
 
-The middleware calls `wisp.method_override(req)` which reads `_method`
-and changes the request method accordingly. This is already set up
-in every generated project.
+The middleware calls `wisp.method_override(req)`, which reads `_method`
+from the query string of a POST request (not from the form body) and
+changes the request method accordingly. This is already set up in every
+generated project, and generated edit forms and delete buttons use it.
 
 ## Adding routes manually
 

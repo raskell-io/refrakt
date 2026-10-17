@@ -80,7 +80,7 @@ Read them from environment variables:
 ```gleam
 let database_url =
   envoy.get("DATABASE_URL")
-  |> result.unwrap("postgres://localhost:5432/my_app_dev")
+  |> result.unwrap("postgres://postgres@localhost:5432/my_app_dev")
 
 let smtp_host =
   envoy.get("SMTP_HOST")

@@ -1,3 +1,4 @@
+import blog/config
 import blog/context.{type Context}
 import blog/web/about_handler
 import blog/web/auth_handler
@@ -5,10 +6,11 @@ import blog/web/error_handler
 import blog/web/home_handler
 import blog/web/post_handler
 import gleam/http
+import refrakt/dev_error
 import wisp.{type Request, type Response}
 
 pub fn handle_request(req: Request, ctx: Context) -> Response {
-  use req <- middleware(req)
+  use req <- middleware(req, ctx)
 
   case wisp.path_segments(req), req.method {
     [], http.Get -> home_handler.index(req, ctx)
@@ -31,12 +33,30 @@ pub fn handle_request(req: Request, ctx: Context) -> Response {
   }
 }
 
-fn middleware(req: Request, next: fn(Request) -> Response) -> Response {
+fn middleware(
+  req: Request,
+  ctx: Context,
+  next: fn(Request) -> Response,
+) -> Response {
   let req = wisp.method_override(req)
   use <- wisp.log_request(req)
-  use <- wisp.rescue_crashes
+  use <- rescue_crashes(req, ctx)
   use <- wisp.serve_static(req, under: "/static", from: priv_static())
   next(req)
+}
+
+/// In development a crash shows the detailed error page (error, stack
+/// trace, request). Everywhere else it is logged and the visitor gets a
+/// plain 500, so internals never leak in production.
+fn rescue_crashes(
+  req: Request,
+  ctx: Context,
+  next: fn() -> Response,
+) -> Response {
+  case ctx.config.env {
+    config.Dev -> dev_error.rescue(req, next)
+    config.Test | config.Prod -> wisp.rescue_crashes(next)
+  }
 }
 
 fn priv_static() -> String {

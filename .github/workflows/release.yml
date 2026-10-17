@@ -1,0 +1,99 @@
+name: Release
+
+# Pushing a tag like v0.4.0 publishes both packages to Hex (library first,
+# then the CLI) and creates a GitHub release with the matching CHANGELOG
+# section as its notes. Requires the HEXPM_API_KEY repository secret.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  OTP_VERSION: "27"
+  GLEAM_VERSION: "1.19"
+  REBAR3_VERSION: "3"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+
+      - name: Check the tag matches both package versions
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          status=0
+          for pkg in refrakt refrakt_cli; do
+            pkg_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "packages/$pkg/gleam.toml")"
+            if [ "$pkg_version" != "$version" ]; then
+              echo "::error::packages/$pkg/gleam.toml has version '$pkg_version', tag is '$GITHUB_REF_NAME'"
+              status=1
+            fi
+          done
+          if ! grep -q "\"refrakt_cli $version\"" packages/refrakt_cli/src/refrakt_cli.gleam; then
+            echo "::error::refrakt_cli --version does not print $version"
+            status=1
+          fi
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            status=1
+          fi
+          exit "$status"
+
+      - name: Test refrakt
+        working-directory: packages/refrakt
+        run: |
+          gleam format --check src test
+          gleam build --warnings-as-errors
+          gleam test
+
+      - name: Test refrakt_cli
+        working-directory: packages/refrakt_cli
+        run: |
+          gleam format --check src test
+          gleam build --warnings-as-errors
+          gleam test
+
+      # stdin is closed so an unexpected prompt fails the job instead of
+      # hanging it; --yes answers the expected confirmation prompts.
+      - name: Publish refrakt
+        working-directory: packages/refrakt
+        env:
+          HEXPM_API_KEY: ${{ secrets.HEXPM_API_KEY }}
+        run: gleam publish --yes < /dev/null
+
+      - name: Publish refrakt_cli
+        working-directory: packages/refrakt_cli
+        env:
+          HEXPM_API_KEY: ${{ secrets.HEXPM_API_KEY }}
+        run: gleam publish --yes < /dev/null
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The CHANGELOG section for this version, without its heading.
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
