@@ -8,7 +8,10 @@
 #   3. `gen resource posts ...`, `gen resource memos ... --api`, `gen page
 #      about`, and `gen auth` when the app has a database, all run through
 #      the app's own dev-dependency
-#   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`
+#   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`.
+#      With a database, `gleam test` includes the DB-backed tests that go
+#      through test/app/support/test_db.gleam (create/show/update/delete,
+#      register/login)
 #   5. with a database: `refrakt_cli migrate` (including a hand-written
 #      multi-statement migration and a failing one that must roll back),
 #      check that APP_ENV=prod refuses a missing, development or short
@@ -23,13 +26,17 @@
 #   mise exec -- .github/scripts/test-generated-app.sh sqlite
 #
 # Environment:
-#   SKIP_RUNTIME=1  stop after build/test/format (no migrate, boot or curl)
+#   SKIP_RUNTIME=1  stop after build/test/format (no migrate, boot or curl).
+#                   For postgres without a server on localhost:5432 it
+#                   also skips `gleam test`, whose DB-backed tests need one
 #   PORT            port the app listens on while smoke-testing (default 4000)
 #
 # The postgres variant expects a server on localhost:5432 that accepts the
-# connection URL in the generated src/app/data/repo.gleam
-# (postgres://postgres@localhost:5432/app_dev) and creates the app_dev
-# database itself, using psql when the database is missing.
+# connection URLs in the generated src/app/data/repo.gleam
+# (postgres://postgres@localhost:5432/app_dev) and
+# test/app/support/test_db.gleam (postgres://postgres@localhost:5432/app_test),
+# and creates the app_dev and app_test databases itself, using psql when
+# they are missing.
 
 set -euo pipefail
 
@@ -246,9 +253,51 @@ if [ "$db" != none ]; then
 fi
 cli routes
 
+# create_database <name>: create a Postgres database unless it exists
+create_database() {
+  if command -v psql > /dev/null; then
+    psql "postgres://postgres@localhost:5432/postgres" -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = '$1'" | grep -q 1 ||
+      psql "postgres://postgres@localhost:5432/postgres" -c "CREATE DATABASE $1"
+  else
+    echo "psql not found; assuming $1 already exists"
+  fi
+}
+
+postgres_reachable() {
+  (exec 3<> /dev/tcp/localhost/5432) 2> /dev/null
+}
+
+# The generated tests that use test/app/support/test_db.gleam need the
+# database: on SQLite each test gets its own in-memory one, on Postgres
+# they run in rolled-back transactions on app_test.
+run_tests=1
+if [ "$db" = postgres ]; then
+  if postgres_reachable; then
+    step "Creating the app_test database for the DB-backed tests"
+    create_database app_test
+  elif [ "${SKIP_RUNTIME:-}" = 1 ]; then
+    run_tests=0
+  else
+    fail "no Postgres server on localhost:5432 for the DB-backed tests"
+  fi
+fi
+
 step "Build, test, format"
 gleam_hex build --warnings-as-errors
-gleam_hex test
+if [ "$run_tests" = 1 ]; then
+  if [ "$db" != none ]; then
+    # gleam test runs every *_test function, so these run below
+    for test_file in post_handler_test memo_handler_test auth_handler_test; do
+      grep -q "use ctx <- test_db.with_context()" "test/app/web/$test_file.gleam" ||
+        fail "test/app/web/$test_file.gleam has no tests against the test database"
+    done
+  fi
+  gleam_hex test
+else
+  echo "skipping gleam test: the DB-backed tests need Postgres on localhost:5432"
+  echo "(gleam build above compiled them; CI runs them against its Postgres service)"
+fi
 gleam format --check src test
 
 if [ "$db" = none ] || [ "${SKIP_RUNTIME:-}" = 1 ]; then
@@ -258,13 +307,7 @@ fi
 
 if [ "$db" = postgres ]; then
   step "Creating the app_dev database if needed"
-  if command -v psql > /dev/null; then
-    psql "postgres://postgres@localhost:5432/postgres" -tAc \
-      "SELECT 1 FROM pg_database WHERE datname = 'app_dev'" | grep -q 1 ||
-      psql "postgres://postgres@localhost:5432/postgres" -c "CREATE DATABASE app_dev"
-  else
-    echo "psql not found; assuming app_dev already exists"
-  fi
+  create_database app_dev
 fi
 
 step "Running migrations"

@@ -234,6 +234,28 @@ pub fn run_applies_each_migration_with_its_record_in_one_transaction_test() {
   ])
 }
 
+pub fn run_quietly_applies_pending_migrations_like_run_test() {
+  setup([#("001_first.sql", "SELECT 1"), #("002_second.sql", "SELECT 2")])
+  let log = start_log()
+  let result =
+    migrate.run_quietly(
+      test_dir,
+      query: fn(_) { Ok([]) },
+      transaction: fn(scripts) {
+        append_log(log, scripts)
+        Ok(Nil)
+      },
+    )
+
+  result |> should.equal(Ok(2))
+  read_log(log)
+  |> list.drop(1)
+  |> should.equal([
+    ["SELECT 1", "INSERT INTO _migrations (name) VALUES ('001_first.sql')"],
+    ["SELECT 2", "INSERT INTO _migrations (name) VALUES ('002_second.sql')"],
+  ])
+}
+
 pub fn run_stops_at_first_failure_and_names_the_file_test() {
   setup([
     #("001_good.sql", "SELECT 1"),

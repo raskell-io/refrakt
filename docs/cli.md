@@ -68,7 +68,10 @@ refrakt gen resource posts title:string body:text --api
 - Domain type
 - Database repo (Pog or Sqlight, auto-detected)
 - SQL migration
-- Tests
+- Tests, including create/show/update/delete through the router
+  against a real database
+- `test/<app>/support/test_db.gleam`, if the app has none yet (see
+  [Testing](testing.md#tests-against-the-database))
 
 **Creates (API mode with `--api`):**
 - Handler (5 actions: index, show, create, update, delete — JSON)
@@ -78,7 +81,9 @@ refrakt gen resource posts title:string body:text --api
 - Domain type
 - Database repo
 - SQL migration
-- Tests (bad bodies and unknown ids; no database needed)
+- Tests: bad bodies and unknown ids (no database needed), and
+  create/show/update/delete against the test database
+- `test/<app>/support/test_db.gleam`, if the app has none yet
 
 **Patches:** `router.gleam` with RESTful routes (HTML: 7 routes,
 API: 5 routes under `/api/` prefix).
@@ -144,7 +149,9 @@ refrakt gen auth
 ```
 
 **Creates:** 9 files — user domain, user repo, auth handler, auth
-views, auth form, auth middleware, migration, tests.
+views, auth form, auth middleware, migration, tests (including a
+register and log-in round trip against the test database), plus
+`test/<app>/support/test_db.gleam` if the app has none yet.
 
 **Patches:** `router.gleam` with 5 auth routes, and `gleam.toml` with the
 `argus` dependency (Argon2 password hashing) if it isn't there yet.

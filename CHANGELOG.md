@@ -6,6 +6,40 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Test database:** copy `test/<app>/support/test_db.gleam` from a
+  freshly generated app with the same database (or run any `gen
+  resource` or `gen auth`, which writes it when it is missing). On
+  Postgres, create the test database once:
+  `createdb -h localhost -U postgres <app>_test`, and do the same in
+  CI before `gleam test`.
+- **Dependencies:** bump `refrakt` to the release with
+  `testing.with_database` and `migrate.run_quietly`.
+
+### Added
+
+- `testing.with_database(open:, close:, run:)` runs a test against a
+  database and always closes it, also after a failed assertion. It
+  knows no database driver.
+- `migrate.run_quietly` applies migrations like `migrate.run` without
+  printing, for test databases.
+- `gen resource` and `gen auth` write `test/<app>/support/test_db.gleam`
+  when the app has none. Its `with_context` gives a test a `Context` on
+  a real, migrated database that is left clean: on Postgres a
+  transaction on `<app>_test` (or `DATABASE_URL`) that is always
+  rolled back, on SQLite a fresh shared-cache in-memory database per
+  test (#21).
+- Generated resource tests create, show, update and delete a record
+  through the router against the test database; `--api` resources do
+  the same with JSON. Generated auth tests register and log in (#21).
+- The generated-project CI creates `app_test` on Postgres so the
+  DB-backed tests run.
+
+### Changed
+
+- The README of a new app with a database explains the test database.
+
 ## [0.5.0] - 2026-10-17
 
 Milestone 0.5, "safe to put in front of users": CSRF protection,

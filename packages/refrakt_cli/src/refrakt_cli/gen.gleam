@@ -203,13 +203,19 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
       False -> resource_test(app, name, singular, fields, db)
     })
 
+  // The generated tests run against a real database
+  let test_db_paths = case ensure_test_db(app, db) {
+    Ok(path) -> [path]
+    Error(Nil) -> []
+  }
+
   // Patch router and format
   let _ = case api_mode {
     True -> patch_router_api_resource(app, name, singular)
     False -> patch_router_resource(app, name, singular)
   }
   let router_path = "src/" <> app <> "/router.gleam"
-  format.format_files([router_path, ..created_paths])
+  format.format_files([router_path, ..list.append(created_paths, test_db_paths)])
 
   io.println("")
   io.println("Created:")
@@ -225,6 +231,7 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   io.println("  " <> repo_path)
   io.println("  " <> migration_path)
   io.println("  " <> test_path)
+  list.each(test_db_paths, fn(path) { io.println("  " <> path) })
   io.println("")
   io.println("Updated:")
   io.println("  " <> router_path)
@@ -315,6 +322,12 @@ fn auth_with_db(db: DbChoice) {
     let assert Ok(_) = simplifile.write(path, content)
   })
 
+  // The generated auth tests register and log in against a real database
+  let test_db_paths = case ensure_test_db(app, db) {
+    Ok(path) -> [path]
+    Error(Nil) -> []
+  }
+
   // Passwords are hashed with Argon2 from the argus package
   let added_argus = project.add_dependency("argus", argus_requirement)
 
@@ -328,11 +341,12 @@ fn auth_with_db(db: DbChoice) {
         False -> Error(Nil)
       }
     })
-  format.format_files([router_path, ..gleam_paths])
+  format.format_files([router_path, ..list.append(gleam_paths, test_db_paths)])
 
   io.println("")
   io.println("Created:")
   list.each(files, fn(file) { io.println("  " <> file.0) })
+  list.each(test_db_paths, fn(path) { io.println("  " <> path) })
   io.println("")
   io.println("Updated:")
   io.println("  src/" <> app <> "/router.gleam")
@@ -705,6 +719,26 @@ fn api_sample_json(field_type: String) -> String {
     "float" -> "json.float(3.14)"
     "bool" -> "json.bool(True)"
     _ -> "json.string(\"test value\")"
+  }
+}
+
+/// Another valid JSON value for a field, for generated update tests.
+fn api_updated_json(field_type: String) -> String {
+  case field_type {
+    "int" -> "json.int(7)"
+    "float" -> "json.float(2.5)"
+    "bool" -> "json.bool(False)"
+    _ -> "json.string(\"updated value\")"
+  }
+}
+
+/// `api_updated_json` as it appears in a JSON response.
+fn api_updated_json_text(field_type: String) -> String {
+  case field_type {
+    "int" -> "7"
+    "float" -> "2.5"
+    "bool" -> "false"
+    _ -> "\"updated value\""
   }
 }
 
@@ -1969,6 +2003,24 @@ fn api_resource_test(
     })
     |> string.join("\n")
 
+  let updated_fields =
+    fields
+    |> list.map(fn(f) {
+      "    #(\"" <> f.0 <> "\", " <> api_updated_json(f.1) <> "),"
+    })
+    |> string.join("\n")
+
+  // The updated value of the first field, as the JSON response shows it
+  let updated_check = case fields {
+    [#(name, field_type), ..] -> "
+  simulate.read_body(updated)
+  |> string.contains(" <> string.inspect(
+        "\"" <> name <> "\":" <> api_updated_json_text(field_type),
+      ) <> ")
+  |> should.be_true"
+    [] -> ""
+  }
+
   let validation_tests = case api_required_fields(fields) {
     [] -> ""
     [#(name, _), ..] -> "
@@ -2018,23 +2070,27 @@ pub fn create_with_wrong_field_type_returns_400_test() {
 
   "//// Tests for the " <> resource_plural <> " JSON API.
 ////
-//// These cover what a handler answers before it reaches the database:
-//// malformed and invalid bodies, and ids that are not numbers. Creating,
-//// updating and deleting rows needs a migrated database; try those
-//// against the running app (`refrakt migrate`, then curl " <> path <> ").
+//// Most cover what a handler answers before it reaches the database:
+//// malformed and invalid bodies, and ids that are not numbers. The tests
+//// at the end create, update and delete a row on the test
+//// database (test/" <> app_name <> "/support/test_db.gleam).
 
 import gleam/dynamic/decode
 import gleam/http
-import gleam/json" <> db_imports <> "
+import gleam/http/response
+import gleam/json
+import gleam/string" <> db_imports <> "
 import gleeunit/should
 import " <> app_name <> "/config
 import " <> app_name <> "/context.{type Context, Context}
+import " <> app_name <> "/router
+import " <> app_name <> "/support/test_db
 import " <> app_name <> "/web/forms/" <> form <> "
 import " <> app_name <> "/web/" <> handler <> "
 import refrakt/testing
 import wisp/simulate
 
-/// A context whose database these tests never reach.
+/// A context whose database the tests that do not use test_db never reach.
 fn test_context() -> Context {
   let assert Ok(cfg) = config.load()
   Context(config: cfg, " <> test_db <> ")
@@ -2092,6 +2148,38 @@ pub fn delete_unknown_id_returns_404_test() {
     |> " <> handler <> ".delete(test_context(), \"unknown\")
 
   response.status |> should.equal(404)
+}
+
+// -- Against the test database -------------------------------------------
+
+pub fn create_show_update_delete_test() {
+  use ctx <- test_db.with_context()
+
+  let created =
+    testing.json_request(http.Post, \"" <> path <> "\", valid_body())
+    |> router.handle_request(ctx)
+  created.status |> should.equal(201)
+  let assert Ok(path) = response.get_header(created, \"location\")
+
+  let shown = simulate.request(http.Get, path) |> router.handle_request(ctx)
+  shown.status |> should.equal(200)
+
+  let updated =
+    testing.json_request(http.Put, path, updated_body())
+    |> router.handle_request(ctx)
+  updated.status |> should.equal(200)" <> updated_check <> "
+
+  let deleted = simulate.request(http.Delete, path) |> router.handle_request(ctx)
+  deleted.status |> should.equal(204)
+  let gone = simulate.request(http.Get, path) |> router.handle_request(ctx)
+  gone.status |> should.equal(404)
+}
+
+fn updated_body() -> String {
+  json.object([
+" <> updated_fields <> "
+  ])
+  |> json.to_string
 }
 "
 }
@@ -2151,11 +2239,79 @@ pub fn same_origin_invalid_create_rerenders_form_test() {
 
   let #(context_imports, context_value) = templates.test_context(db)
 
+  // The show page's heading is the first field; check it when it is text.
+  let #(created_check, updated_check) = case fields {
+    [#(_, "string"), ..] | [#(_, "text"), ..] -> #(
+      "
+  simulate.read_body(shown)
+  |> string.contains(\"test value\")
+  |> should.be_true",
+      "
+  get(path, ctx)
+  |> simulate.read_body
+  |> string.contains(\"updated value\")
+  |> should.be_true",
+    )
+    _ -> #("", "")
+  }
+
+  let path = "/" <> resource_plural
+
+  let db_tests = "
+// -- Against the test database: test/" <> app_name <> "/support/test_db.gleam --
+
+pub fn create_show_update_delete_test() {
+  use ctx <- test_db.with_context()
+
+  let created =
+    simulate.browser_request(http.Post, \"" <> path <> "\")
+    |> simulate.form_body(form_values())
+    |> router.handle_request(ctx)
+  created.status |> should.equal(303)
+  let assert Ok(path) = response.get_header(created, \"location\")
+
+  let shown = get(path, ctx)
+  shown.status |> should.equal(200)" <> created_check <> "
+
+  let updated =
+    simulate.browser_request(http.Put, path)
+    |> simulate.form_body(updated_form_values())
+    |> router.handle_request(ctx)
+  updated.status |> should.equal(303)" <> updated_check <> "
+
+  let deleted =
+    simulate.browser_request(http.Delete, path)
+    |> router.handle_request(ctx)
+  deleted.status |> should.equal(303)
+  get(path, ctx).status |> should.equal(404)
+}
+
+fn get(path: String, ctx: Context) -> wisp.Response {
+  simulate.browser_request(http.Get, path)
+  |> router.handle_request(ctx)
+}
+
+fn form_values() -> List(#(String, String)) {
+  [
+" <> sample_form_values(fields, False) <> "
+  ]
+}
+
+fn updated_form_values() -> List(#(String, String)) {
+  [
+" <> sample_form_values(fields, True) <> "
+  ]
+}
+"
+
   "import gleam/http
+import gleam/http/response
+import gleam/string
 import gleeunit/should
 import " <> app_name <> "/config
 import " <> app_name <> "/context.{type Context}
 import " <> app_name <> "/router
+import " <> app_name <> "/support/test_db
 import " <> app_name <> "/web/forms/" <> resource_singular <> "_form" <> context_imports <> "
 import wisp
 import wisp/simulate
@@ -2190,11 +2346,68 @@ pub fn cross_site_create_is_rejected_test() {
   |> should.equal(403)
 }
 " <> missing_field_tests <> "
+/// A context whose database the tests above never reach.
 fn test_context() -> Context {
   let assert Ok(cfg) = config.load()
   " <> context_value <> "
 }
-"
+" <> db_tests
+}
+
+/// Write `test/<app>/support/test_db.gleam` unless the app has one.
+/// Returns its path when it was created.
+fn ensure_test_db(app: String, db: DbChoice) -> Result(String, Nil) {
+  let path = "test/" <> app <> "/support/test_db.gleam"
+  case simplifile.is_file(path) {
+    Ok(True) -> Error(Nil)
+    _ -> {
+      let _ = simplifile.create_directory_all("test/" <> app <> "/support")
+      let assert Ok(_) =
+        simplifile.write(path, templates.test_db_module(app, db))
+      Ok(path)
+    }
+  }
+}
+
+/// A form value the generated form accepts for a field, for the tests
+/// that create and update rows. `updated` gives a different one.
+fn sample_form_value(field_type: String, updated: Bool) -> String {
+  case unwrap_optional(field_type), updated {
+    "bool", _ -> "on"
+    "int", False -> "42"
+    "int", True -> "7"
+    "float", False -> "3.14"
+    "float", True -> "2.5"
+    "date", False -> "2026-01-01"
+    "date", True -> "2026-02-02"
+    "datetime", False -> "2026-01-01T00:00:00Z"
+    "datetime", True -> "2026-02-02T00:00:00Z"
+    _, False -> "test value"
+    _, True -> "updated value"
+  }
+}
+
+/// `optional(int)` is `int`; other types are themselves.
+fn unwrap_optional(field_type: String) -> String {
+  case
+    string.starts_with(field_type, "optional("),
+    string.ends_with(field_type, ")")
+  {
+    True, True -> field_type |> string.drop_start(9) |> string.drop_end(1)
+    _, _ -> field_type
+  }
+}
+
+/// The form values of a resource, as Gleam list items.
+fn sample_form_values(
+  fields: List(#(String, String)),
+  updated: Bool,
+) -> String {
+  fields
+  |> list.map(fn(f) {
+    "    #(\"" <> f.0 <> "\", \"" <> sample_form_value(f.1, updated) <> "\"),"
+  })
+  |> string.join("\n")
 }
 
 // =============================================================================
@@ -3022,10 +3235,17 @@ pub fn require_auth(
 
 fn auth_test(app: String) -> String {
   "import argus
+import gleam/http
+import gleam/list
 import gleam/string
 import gleeunit/should
+import " <> app <> "/context.{type Context}
 import " <> app <> "/domain/auth
 import " <> app <> "/domain/user.{User}
+import " <> app <> "/router
+import " <> app <> "/support/test_db
+import wisp
+import wisp/simulate
 
 pub fn hash_password_round_trip_test() {
   let assert Ok(hash) = auth.hash_password(\"secret123\")
@@ -3082,6 +3302,62 @@ pub fn authenticate_rejects_a_wrong_password_test() {
 pub fn authenticate_rejects_an_unknown_user_test() {
   auth.authenticate(Error(Nil), \"secret123\")
   |> should.be_error
+}
+
+// -- Against the test database: test/" <> app <> "/support/test_db.gleam --
+
+const email = \"someone@example.com\"
+
+const password = \"correct horse battery staple\"
+
+pub fn register_then_log_in_test() {
+  use ctx <- test_db.with_context()
+
+  let registered = register(ctx, email, password)
+  registered.status |> should.equal(303)
+  has_session_cookie(registered) |> should.be_true
+
+  let logged_in = log_in(ctx, email, password)
+  logged_in.status |> should.equal(303)
+  has_session_cookie(logged_in) |> should.be_true
+
+  let rejected = log_in(ctx, email, \"wrong password\")
+  rejected.status |> should.equal(422)
+  has_session_cookie(rejected) |> should.be_false
+
+  log_in(ctx, \"nobody@example.com\", password).status
+  |> should.equal(422)
+}
+
+pub fn register_with_a_taken_email_test() {
+  use ctx <- test_db.with_context()
+
+  register(ctx, email, password).status |> should.equal(303)
+  // On Postgres the failed INSERT ends the test's transaction, so it
+  // comes last.
+  register(ctx, email, password).status |> should.equal(422)
+}
+
+fn register(ctx: Context, email: String, password: String) -> wisp.Response {
+  simulate.browser_request(http.Post, \"/register\")
+  |> simulate.form_body([
+    #(\"email\", email),
+    #(\"password\", password),
+    #(\"password_confirmation\", password),
+  ])
+  |> router.handle_request(ctx)
+}
+
+fn log_in(ctx: Context, email: String, password: String) -> wisp.Response {
+  simulate.browser_request(http.Post, \"/login\")
+  |> simulate.form_body([#(\"email\", email), #(\"password\", password)])
+  |> router.handle_request(ctx)
+}
+
+fn has_session_cookie(response: wisp.Response) -> Bool {
+  list.any(response.headers, fn(header) {
+    header.0 == \"set-cookie\" && string.starts_with(header.1, \"_session=\")
+  })
 }
 "
 }

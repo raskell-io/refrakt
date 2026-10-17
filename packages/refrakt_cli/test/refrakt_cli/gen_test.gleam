@@ -197,6 +197,17 @@ pub fn gen_resource_creates_all_files_test() {
     file_contains("src/res_app/web/post_views.gleam", "name(\"_method\")")
     |> should.be_false
 
+    // Tests run against a real database, rolled back after each test
+    let test_db = "test/res_app/support/test_db.gleam"
+    file_contains(test_db, "pog.transaction") |> should.be_true
+    file_contains(test_db, "migrate.run_quietly") |> should.be_true
+    file_contains(test_db, "localhost:5432/res_app_test") |> should.be_true
+    let test_file = "test/res_app/web/post_handler_test.gleam"
+    file_contains(test_file, "use ctx <- test_db.with_context()")
+    |> should.be_true
+    file_contains(test_file, "pub fn create_show_update_delete_test()")
+    |> should.be_true
+
     let assert Ok(_) = set_cwd(cwd)
     Nil
   })
@@ -257,7 +268,11 @@ pub fn gen_two_resources_no_duplication_test() {
     let assert Ok(_) = set_cwd(project_dir)
 
     gen.resource("posts", ["title:string"])
+    // The test database module is yours: later generators leave it alone
+    let test_db = "test/two_app/support/test_db.gleam"
+    let assert Ok(_) = simplifile.append(test_db, "// edited\n")
     gen.resource("comments", ["body:text"])
+    file_contains(test_db, "// edited") |> should.be_true
 
     // Both handlers exist
     file_exists("src/two_app/web/post_handler.gleam") |> should.be_true
@@ -338,6 +353,11 @@ pub fn gen_api_resource_creates_json_handlers_test() {
     // Routes live under /api
     file_contains("src/api_app/router.gleam", "[\"api\", \"notes\", id]")
     |> should.be_true
+
+    // A fresh in-memory SQLite database per test
+    let test_db = "test/api_app/support/test_db.gleam"
+    file_contains(test_db, "?mode=memory&cache=shared") |> should.be_true
+    file_contains(test_db, "pog") |> should.be_false
 
     let assert Ok(_) = set_cwd(cwd)
     Nil
@@ -441,6 +461,14 @@ pub fn gen_auth_creates_all_files_test() {
     file_contains(domain, "pub fn hash_password(password: String) -> Result(")
     |> should.be_true
     file_contains("gleam.toml", "argus = \">= 2.0.0 and < 3.0.0\"")
+    |> should.be_true
+
+    // Register and log in against the test database
+    file_exists("test/auth_app/support/test_db.gleam") |> should.be_true
+    let test_file = "test/auth_app/web/auth_handler_test.gleam"
+    file_contains(test_file, "pub fn register_then_log_in_test()")
+    |> should.be_true
+    file_contains(test_file, "use ctx <- test_db.with_context()")
     |> should.be_true
 
     let assert Ok(_) = set_cwd(cwd)

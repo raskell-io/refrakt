@@ -14,7 +14,17 @@
 //// }
 //// ```
 ////
+//// ## Tests against a real database
+////
+//// `with_database` runs a test body against a database that is set up
+//// for it and torn down after it, also when an assertion fails. It knows
+//// nothing about any database driver: generated apps call it from
+//// `test/<app>/support/test_db.gleam`, which opens the database with the
+//// app's own `pog` or `sqlight` dependency, applies the migrations and
+//// keeps every test's writes from reaching the next test.
+////
 
+import exception
 import gleam/http
 import gleam/http/request
 import gleam/http/response.{type Response}
@@ -143,5 +153,43 @@ pub fn assert_header(
   case response.get_header(resp, name) {
     Ok(value) -> value == expected
     Error(_) -> False
+  }
+}
+
+/// Run `body` with a database opened by `open`, then close it with
+/// `close`. `close` always runs: also when `body` panics, as a failing
+/// `should` assertion does, so one failing test cannot leave its data
+/// behind for the next.
+///
+/// When `open` fails, the test fails with a panic that shows its error,
+/// so explain there how to make the database reachable.
+///
+/// ```gleam
+/// pub fn with_db(body: fn(sqlight.Connection) -> a) -> a {
+///   testing.with_database(
+///     open: fn() {
+///       sqlight.open("file:test?mode=memory&cache=shared")
+///       |> result.map_error(fn(error) { error.message })
+///     },
+///     close: fn(conn) {
+///       let _ = sqlight.close(conn)
+///       Nil
+///     },
+///     run: body,
+///   )
+/// }
+/// ```
+pub fn with_database(
+  open open: fn() -> Result(db, String),
+  close close: fn(db) -> Nil,
+  run body: fn(db) -> a,
+) -> a {
+  case open() {
+    Error(message) ->
+      panic as { "Could not open the test database: " <> message }
+    Ok(db) -> {
+      use <- exception.defer(fn() { close(db) })
+      body(db)
+    }
   }
 }
