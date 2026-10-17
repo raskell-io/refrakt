@@ -74,6 +74,37 @@ pub fn api_index(req: Request, ctx: Context) -> Response {
 }
 ```
 
+`refrakt gen resource posts ... --api` generates a complete JSON
+handler in this style. Its `create` decodes and validates the body with
+the generated params module, then answers 201 with the record and a
+`Location` header, 422 with `{"errors": {field: message}}`, or 400 when
+the body has the wrong shape:
+
+```gleam
+pub fn create(req: Request, ctx: Context) -> Response {
+  use body <- wisp.require_json(req)
+
+  case post_form.decode_json(body) {
+    Error(error) -> invalid_body(error)
+    Ok(params) ->
+      case post_repo.create(ctx.db, params) {
+        Ok(item) ->
+          json_response(to_json(item), 201)
+          |> response.set_header(
+            "location",
+            "/api/posts/" <> int.to_string(item.id),
+          )
+        Error(_) -> internal_error()
+      }
+  }
+}
+```
+
+`update` answers 200 with the record, `delete` 204 with no body, and
+`show`, `update` and `delete` answer 404 `{"error": "not found"}` for an
+unknown id. See [CLI](cli.md#refrakt-gen-resource-name-fields) for the
+full table.
+
 ## Reading request data
 
 ### Form data
@@ -94,6 +125,30 @@ pub fn create(req: Request, ctx: Context) -> Response {
   // json: Dynamic — decode it with gleam/dynamic/decode
 }
 ```
+
+`wisp.require_json` answers 415 unless the content type is
+`application/json` and 400 when the body is not valid JSON. An `--api`
+resource's params module decodes the `Dynamic` for you:
+
+```gleam
+// web/forms/post_form.gleam (generated with --api)
+pub fn decode_json(data: Dynamic) -> Result(PostParams, JsonError)
+
+pub fn decoder() -> decode.Decoder(PostParams) {
+  use title <- decode.optional_field("title", "", decode.string)
+  use body <- decode.optional_field("body", "", decode.string)
+  decode.success(PostParams(title:, body:))
+}
+
+pub fn validate_params(params: PostParams) -> List(#(String, String)) {
+  []
+  |> validate.required(params.title, "title", "Title is required")
+  |> validate.required(params.body, "body", "Body is required")
+}
+```
+
+`JsonError` is `MalformedBody(List(decode.DecodeError))` (answer 400)
+or `InvalidParams(List(#(String, String)))` (answer 422).
 
 ### Query parameters
 
