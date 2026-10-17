@@ -4,6 +4,8 @@
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 import refrakt_cli/format
 import refrakt_cli/project
@@ -83,18 +85,70 @@ pub fn resource(name: String, raw_args: List(String)) {
 
 fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   let app = project.app_name()
-  let api_mode = list.contains(raw_args, "--api")
-  let belongs_to = extract_flag_value(raw_args, "--belongs-to")
-  let raw_fields = list.filter(raw_args, fn(a) { !string.starts_with(a, "--") })
+  let parsed = {
+    use #(raw_fields, api_mode, belongs_to) <- result.try(resource_args(
+      raw_args,
+      [],
+      False,
+      None,
+    ))
+    use fields <- result.try(parse_fields(raw_fields))
+    // --belongs-to adds a foreign key field to the parent
+    let fields = case belongs_to {
+      Some(parent) ->
+        list.append(fields, [#(singularize(parent) <> "_id", "int")])
+      None -> fields
+    }
+    Ok(#(fields, api_mode))
+  }
+  case parsed {
+    Error(message) -> {
+      io.println("Error: " <> message)
+      io.println("Nothing was generated.")
+    }
+    Ok(#(fields, api_mode)) ->
+      generate_resource(app, name, fields, api_mode, db)
+  }
+}
+
+/// Split `gen resource` arguments into field specs, `--api` and the
+/// `--belongs-to` parent.
+fn resource_args(
+  args: List(String),
+  fields: List(String),
+  api_mode: Bool,
+  belongs_to: Option(String),
+) -> Result(#(List(String), Bool, Option(String)), String) {
+  case args {
+    [] -> Ok(#(list.reverse(fields), api_mode, belongs_to))
+    ["--api", ..rest] -> resource_args(rest, fields, True, belongs_to)
+    ["--belongs-to=" <> parent, ..rest] | ["--belongs-to", parent, ..rest] ->
+      case parent == "" || string.starts_with(parent, "-") {
+        True -> Error(belongs_to_usage)
+        False -> resource_args(rest, fields, api_mode, Some(parent))
+      }
+    ["--belongs-to"] -> Error(belongs_to_usage)
+    [arg, ..rest] ->
+      case string.starts_with(arg, "-") {
+        True ->
+          Error("Unknown option " <> arg <> " (use --api or --belongs-to).")
+        False -> resource_args(rest, [arg, ..fields], api_mode, belongs_to)
+      }
+  }
+}
+
+const belongs_to_usage =
+  "--belongs-to needs the parent resource, such as --belongs-to posts."
+
+fn generate_resource(
+  app: String,
+  name: String,
+  fields: List(#(String, String)),
+  api_mode: Bool,
+  db: DbChoice,
+) {
   let singular = singularize(name)
   let type_name = capitalize(singular)
-
-  // Add foreign key field if --belongs-to is set
-  let extra_fields = case belongs_to {
-    Ok(parent) -> [#(singularize(parent) <> "_id", "int")]
-    Error(_) -> []
-  }
-  let fields = list.append(parse_fields(raw_fields), extra_fields)
 
   // Paths
   let handler_path = "src/" <> app <> "/web/" <> singular <> "_handler.gleam"
@@ -228,6 +282,14 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
   io.println("")
   io.println("Updated:")
   io.println("  " <> router_path)
+}
+
+/// A field whose Gleam type is `String`: string, text, date or datetime.
+fn is_plain_string(field_type: String) -> Bool {
+  case field_type {
+    "string" | "text" | "date" | "datetime" -> True
+    _ -> False
+  }
 }
 
 // =============================================================================
@@ -680,6 +742,16 @@ pub fn script_tag() -> Element(Nil) {
 
 /// The `gleam/dynamic/decode` decoder for one field of a JSON body.
 fn api_field_decoder(field_type: String) -> String {
+  case is_optional(field_type) {
+    True ->
+      "decode.optional("
+      <> plain_api_field_decoder(base_type(field_type))
+      <> ")"
+    False -> plain_api_field_decoder(field_type)
+  }
+}
+
+fn plain_api_field_decoder(field_type: String) -> String {
   case field_type {
     "int" -> "decode.int"
     "float" -> "float_or_int()"
@@ -700,7 +772,7 @@ fn api_field_encoder(field_type: String) -> String {
 
 /// A valid JSON value for a field, for generated tests.
 fn api_sample_json(field_type: String) -> String {
-  case field_type {
+  case base_type(field_type) {
     "int" -> "json.int(42)"
     "float" -> "json.float(3.14)"
     "bool" -> "json.bool(True)"
@@ -710,7 +782,7 @@ fn api_sample_json(field_type: String) -> String {
 
 /// A JSON value of the wrong type for a field, for generated tests.
 fn api_wrong_json(field_type: String) -> String {
-  case field_type {
+  case base_type(field_type) {
     "int" | "float" -> "json.string(\"not a number\")"
     "bool" -> "json.string(\"not a bool\")"
     _ -> "json.int(42)"
@@ -730,11 +802,13 @@ fn api_params_module(
 ) -> String {
   let params = type_name <> "Params"
   let required = api_required_fields(fields)
-  let has_float = list.any(fields, fn(f) { f.1 == "float" })
+  let has_float = list.any(fields, fn(f) { base_type(f.1) == "float" })
+  let has_optional = list.any(fields, fn(f) { is_optional(f.1) })
 
   let imports =
     ["import gleam/dynamic.{type Dynamic}", "import gleam/dynamic/decode"]
     |> append_if(has_float, "import gleam/int")
+    |> append_if(has_optional, "import gleam/option.{type Option, None}")
     |> append_if(required != [], "import refrakt/validate")
     |> string.join("\n")
 
@@ -843,7 +917,8 @@ pub fn decode_json(data: Dynamic) -> Result(" <> params <> ", JsonError) {
 
 /// The JSON shape of " <> params <> ". A missing field gets the value an
 /// empty HTML form field would (`\"\"`, `0`, `0.0`, `false`); `null` or a
-/// value of the wrong type fails decoding.
+/// value of the wrong type fails decoding. An optional field may be
+/// missing or `null`, and is then `None`.
 pub fn decoder() -> decode.Decoder(" <> params <> ") {
 " <> decoder_lines <> "
   decode.success(" <> params <> "(" <> constructor_args <> "))
@@ -872,13 +947,17 @@ fn api_resource_handler(
     fields
     |> list.map(fn(f) {
       let #(name, field_type) = f
-      "    #(\""
-      <> name
-      <> "\", "
-      <> api_field_encoder(field_type)
-      <> "(item."
-      <> name
-      <> ")),"
+      let value = case is_optional(field_type) {
+        // None is encoded as null
+        True ->
+          "json.nullable(item."
+          <> name
+          <> ", "
+          <> api_field_encoder(base_type(field_type))
+          <> ")"
+        False -> api_field_encoder(field_type) <> "(item." <> name <> ")"
+      }
+      "    #(\"" <> name <> "\", " <> value <> "),"
     })
     |> string.join("\n")
 
@@ -1091,68 +1170,55 @@ fn resource_views(
   type_name: String,
   fields: List(#(String, String)),
 ) -> String {
-  let first_field = case fields {
-    [#(name, _), ..] -> name
-    [] -> "id"
-  }
-
   let form_field_elements =
     fields
-    |> list.map(fn(f) {
-      let #(fname, ftype) = f
-      let label_text = capitalize(fname)
-      case ftype {
-        "bool" -> "      div([class(\"field\")], [
-        label([], [
-          input([type_(\"checkbox\"), name(\"" <> fname <> "\"), attribute.checked(values." <> fname <> ")]),
-          text(\" " <> label_text <> "\"),
-        ]),
-      ]),"
-        "text" -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        textarea([name(\"" <> fname <> "\")], values." <> fname <> "),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
-        "int" -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        input([type_(\"number\"), name(\"" <> fname <> "\"), value(int.to_string(values." <> fname <> "))]),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
-        "float" -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        input([type_(\"number\"), name(\"" <> fname <> "\"), value(float.to_string(values." <> fname <> "))]),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
-        _ -> "      div([class(\"field\")], [
-        label([], [text(\"" <> label_text <> "\")]),
-        input([type_(\"text\"), name(\"" <> fname <> "\"), value(values." <> fname <> ")]),
-        field_error(errors, \"" <> fname <> "\"),
-      ]),"
-      }
-    })
+    |> list.map(form_field_element)
     |> string.join("\n")
 
-  let float_import = case list.any(fields, fn(f) { f.1 == "float" }) {
+  let show_field_elements =
+    fields
+    |> list.map(fn(f) { "      dt([], [text(\"" <> capitalize(f.0) <> "\")]),
+      dd([], [text(" <> show_value(f) <> ")])," })
+    |> string.join("\n")
+
+  let float_import = case
+    list.any(fields, fn(f) { base_type(f.1) == "float" })
+  {
     True -> "\nimport gleam/float"
     False -> ""
   }
 
   // Import only what the field elements use: an unused import would be
   // a warning in the generated module. `text` fields render a textarea,
-  // every other type an input; only int, float and string-like inputs
-  // set a value.
-  let uses = fn(predicate: fn(String) -> Bool) {
-    list.any(fields, fn(f) { predicate(f.1) })
+  // optional bools a select, every other type an input; all but text
+  // fields and checkboxes set a value.
+  let uses = fn(predicate: fn(#(String, String)) -> Bool) {
+    list.any(fields, predicate)
+  }
+  let renders_input = fn(f: #(String, String)) {
+    base_type(f.1) != "text" && f.1 != "optional(bool)"
   }
   let attribute_imports =
-    ["class", "href", "name", "type_"]
-    |> append_if(uses(fn(t) { t != "text" && t != "bool" }), "value")
+    ["class", "href", "name"]
+    |> append_if(uses(fn(f) { base_type(f.1) == "float" }), "step")
+    |> list.append(["type_"])
+    |> append_if(
+      uses(fn(f) { base_type(f.1) != "text" && f.1 != "bool" }),
+      "value",
+    )
   let html_imports =
-    ["a", "button", "div", "form", "h1"]
-    |> append_if(uses(fn(t) { t != "text" }), "input")
+    ["a", "button", "dd", "div", "dl", "dt", "form", "h1"]
+    |> append_if(uses(renders_input), "input")
     |> list.append(["label", "li", "p", "section"])
-    |> append_if(uses(fn(t) { t == "text" }), "textarea")
+    |> append_if(uses(fn(f) { base_type(f.1) == "text" }), "textarea")
     |> list.append(["ul"])
+
+  // index_view and show_view label a record with its first required
+  // string field, or with its id
+  let show_title = case list.find(fields, fn(f) { is_plain_string(f.1) }) {
+    Ok(#(name, _)) -> "item." <> name
+    Error(_) -> "\"" <> type_name <> " #\" <> int.to_string(item.id)"
+  }
 
   "import gleam/int" <> float_import <> "
 import gleam/list
@@ -1174,7 +1240,7 @@ pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
       list.map(items, fn(item) {
         li([], [
           a([href(\"/" <> resource_plural <> "/\" <> int.to_string(item.id))], [
-            text(item." <> first_field <> "),
+            text(" <> show_title <> "),
           ]),
         ])
       }),
@@ -1184,7 +1250,11 @@ pub fn index_view(items: List(" <> type_name <> ")) -> Element(Nil) {
 
 pub fn show_view(item: " <> type_name <> ") -> Element(Nil) {
   section([class(\"" <> resource_singular <> "\")], [
-    h1([], [text(item." <> first_field <> ")]),
+    h1([], [text(" <> show_title <> ")]),
+    // Fields without a value (None) show as an em dash
+    dl([], [
+" <> show_field_elements <> "
+    ]),
     div([class(\"actions\")], [
       a(
         [
@@ -1243,6 +1313,104 @@ fn field_error(
 "
 }
 
+/// The form element for one field. An optional field renders `None` as
+/// an empty value; an optional bool is a select (blank, Yes, No), since a
+/// checkbox cannot say "not set".
+fn form_field_element(field: #(String, String)) -> String {
+  let #(fname, ftype) = field
+  let label_text = capitalize(fname)
+  let labelled = fn(control: String) { "      div([class(\"field\")], [
+        label([], [text(\"" <> label_text <> "\")]),
+        " <> control <> ",
+        field_error(errors, \"" <> fname <> "\"),
+      ])," }
+  let input = fn(input_type: String, extra: String, shown: String) {
+    "input([type_(\""
+    <> input_type
+    <> "\"), name(\""
+    <> fname
+    <> "\"), "
+    <> extra
+    <> "value("
+    <> shown
+    <> ")])"
+  }
+  let optional_value = fn(to_string: String) {
+    "values."
+    <> fname
+    <> " |> option.map("
+    <> to_string
+    <> ") |> option.unwrap(\"\")"
+  }
+  case ftype {
+    "bool" -> "      div([class(\"field\")], [
+        label([], [
+          input([type_(\"checkbox\"), name(\"" <> fname <> "\"), attribute.checked(values." <> fname <> ")]),
+          text(\" " <> label_text <> "\"),
+        ]),
+      ]),"
+    "text" ->
+      labelled("textarea([name(\"" <> fname <> "\")], values." <> fname <> ")")
+    "int" ->
+      labelled(input("number", "", "int.to_string(values." <> fname <> ")"))
+    "float" ->
+      labelled(input(
+        "number",
+        "step(\"any\"), ",
+        "float.to_string(values." <> fname <> ")",
+      ))
+    "optional(bool)" -> labelled("html.select([name(\"" <> fname <> "\")], [
+          html.option([value(\"\"), attribute.selected(values." <> fname <> " == option.None)], \"—\"),
+          html.option([value(\"true\"), attribute.selected(values." <> fname <> " == option.Some(True))], \"Yes\"),
+          html.option([value(\"false\"), attribute.selected(values." <> fname <> " == option.Some(False))], \"No\"),
+        ])")
+    "optional(text)" ->
+      labelled(
+        "textarea([name(\""
+        <> fname
+        <> "\")], option.unwrap(values."
+        <> fname
+        <> ", \"\"))",
+      )
+    "optional(int)" ->
+      labelled(input("number", "", optional_value("int.to_string")))
+    "optional(float)" ->
+      labelled(input(
+        "number",
+        "step(\"any\"), ",
+        optional_value("float.to_string"),
+      ))
+    "optional(" <> _ ->
+      labelled(input("text", "", "option.unwrap(values." <> fname <> ", \"\")"))
+    _ -> labelled(input("text", "", "values." <> fname))
+  }
+}
+
+/// The text the show view renders for a field; `None` is an em dash.
+fn show_value(field: #(String, String)) -> String {
+  let #(fname, ftype) = field
+  let value = "item." <> fname
+  case ftype {
+    "int" -> "int.to_string(" <> value <> ")"
+    "float" -> "float.to_string(" <> value <> ")"
+    "bool" -> "case " <> value <> " {
+          True -> \"Yes\"
+          False -> \"No\"
+        }"
+    "optional(int)" ->
+      value <> " |> option.map(int.to_string) |> option.unwrap(\"—\")"
+    "optional(float)" ->
+      value <> " |> option.map(float.to_string) |> option.unwrap(\"—\")"
+    "optional(bool)" -> "case " <> value <> " {
+          option.Some(True) -> \"Yes\"
+          option.Some(False) -> \"No\"
+          option.None -> \"—\"
+        }"
+    "optional(" <> _ -> "option.unwrap(" <> value <> ", \"—\")"
+    _ -> value
+  }
+}
+
 fn resource_form(
   app_name: String,
   resource_singular: String,
@@ -1277,28 +1445,23 @@ fn resource_form(
     fields
     |> list.map(fn(f) {
       let #(field_name, field_type) = f
-      case field_type {
+      let value = "get_value(data, \"" <> field_name <> "\")"
+      "    "
+      <> field_name
+      <> ": "
+      <> case field_type {
         "bool" ->
-          "    "
-          <> field_name
-          <> ": list.any(data.values, fn(v) { v.0 == \""
-          <> field_name
-          <> "\" }),"
-        "int" ->
-          "    "
-          <> field_name
-          <> ": result.unwrap(int.parse(get_value(data, \""
-          <> field_name
-          <> "\")), 0),"
-        "float" ->
-          "    "
-          <> field_name
-          <> ": result.unwrap(float.parse(get_value(data, \""
-          <> field_name
-          <> "\")), 0.0),"
+          "list.any(data.values, fn(v) { v.0 == \"" <> field_name <> "\" })"
+        "int" -> "result.unwrap(int.parse(" <> value <> "), 0)"
+        "float" -> "result.unwrap(parse_float(" <> value <> "), 0.0)"
         _ ->
-          "    " <> field_name <> ": get_value(data, \"" <> field_name <> "\"),"
+          case is_optional(field_type) {
+            True ->
+              "optional(" <> value <> ", " <> optional_parser(field_type) <> ")"
+            False -> value
+          }
       }
+      <> ","
     })
     |> string.join("\n")
 
@@ -1319,21 +1482,43 @@ fn resource_form(
     })
     |> string.join("\n")
 
+  // string and text fields are required; an optional field may be blank,
+  // but a number or bool it holds must parse
   let validation_lines =
     fields
-    |> list.filter(fn(f) {
-      let #(_, t) = f
-      t == "string" || t == "text"
-    })
-    |> list.map(fn(f) {
-      let #(name, _) = f
-      "    |> validate.required("
-      <> name
-      <> ", \""
-      <> name
-      <> "\", \""
-      <> capitalize(name)
-      <> " is required\")"
+    |> list.filter_map(fn(f) {
+      let #(name, t) = f
+      let label = capitalize(name)
+      case t {
+        "string" | "text" ->
+          Ok(
+            "    |> validate.required("
+            <> name
+            <> ", \""
+            <> name
+            <> "\", \""
+            <> label
+            <> " is required\")",
+          )
+        "optional(int)" | "optional(float)" | "optional(bool)" ->
+          Ok(
+            "    |> must_parse("
+            <> name
+            <> ", "
+            <> optional_parser(t)
+            <> ", \""
+            <> name
+            <> "\", \""
+            <> label
+            <> case t {
+              "optional(int)" -> " must be a whole number"
+              "optional(float)" -> " must be a number"
+              _ -> " must be yes or no"
+            }
+            <> "\")",
+          )
+        _ -> Error(Nil)
+      }
     })
     |> string.join("\n")
 
@@ -1341,41 +1526,114 @@ fn resource_form(
     fields
     |> list.map(fn(f) {
       let #(name, t) = f
-      case t {
-        "bool" ->
-          "        "
-          <> name
-          <> ": list.any(data.values, fn(v) { v.0 == \""
-          <> name
-          <> "\" }),"
-        "int" ->
-          "        " <> name <> ": result.unwrap(int.parse(" <> name <> "), 0),"
-        "float" ->
-          "        "
-          <> name
-          <> ": result.unwrap(float.parse("
-          <> name
-          <> "), 0.0),"
-        _ -> "        " <> name <> ": " <> name <> ","
+      "        "
+      <> name
+      <> ": "
+      <> case t {
+        "bool" -> "list.any(data.values, fn(v) { v.0 == \"" <> name <> "\" })"
+        "int" -> "result.unwrap(int.parse(" <> name <> "), 0)"
+        "float" -> "result.unwrap(parse_float(" <> name <> "), 0.0)"
+        _ ->
+          case is_optional(t) {
+            True -> "optional(" <> name <> ", " <> optional_parser(t) <> ")"
+            False -> name
+          }
       }
+      <> ","
     })
     |> string.join("\n")
 
-  let extra_imports = case
-    list.any(fields, fn(f) { f.1 == "int" }),
-    list.any(fields, fn(f) { f.1 == "float" })
-  {
-    True, True -> "\nimport gleam/int\nimport gleam/float"
-    True, False -> "\nimport gleam/int"
-    False, True -> "\nimport gleam/float"
-    False, False -> ""
+  let has = fn(predicate: fn(String) -> Bool) {
+    list.any(fields, fn(f) { predicate(f.1) })
   }
+  let validate_import = case has(fn(t) { t == "string" || t == "text" }) {
+    True -> "\nimport refrakt/validate"
+    False -> ""
+  }
+  let has_float = has(fn(t) { base_type(t) == "float" })
+  let has_optional = has(is_optional)
+  let has_must_parse =
+    has(fn(t) {
+      t == "optional(int)" || t == "optional(float)" || t == "optional(bool)"
+    })
+
+  let extra_imports =
+    []
+    |> append_if(
+      has(fn(t) { base_type(t) == "int" }) || has_float,
+      "import gleam/int",
+    )
+    |> append_if(has_float, "import gleam/float")
+    |> append_if(has_optional, "import gleam/string")
+    |> list.map(fn(line) { "\n" <> line })
+    |> string.concat
+
+  // Helpers, only those the fields use (an unused function is a warning)
+  let helpers =
+    []
+    |> append_if(
+      has_optional,
+      "
+/// An optional field: blank is `None`, anything else is parsed (a value
+/// that does not parse is `None` too; `decode` reports it with
+/// `must_parse`).
+fn optional(value: String, parse: fn(String) -> Result(a, Nil)) -> Option(a) {
+  case string.trim(value) {
+    \"\" -> None
+    trimmed -> option.from_result(parse(trimmed))
+  }
+}",
+    )
+    |> append_if(
+      has_must_parse,
+      "
+/// Add an error when an optional field is not blank and does not parse.
+fn must_parse(
+  errors: List(#(String, String)),
+  value: String,
+  parse: fn(String) -> Result(a, Nil),
+  field: String,
+  message: String,
+) -> List(#(String, String)) {
+  case string.trim(value) {
+    \"\" -> errors
+    trimmed ->
+      case parse(trimmed) {
+        Ok(_) -> errors
+        Error(_) -> [#(field, message), ..errors]
+      }
+  }
+}",
+    )
+    |> append_if(
+      has_float,
+      "
+/// Parse a float, accepting whole numbers (`4`) as well as `4.0`.
+fn parse_float(value: String) -> Result(Float, Nil) {
+  case float.parse(value) {
+    Ok(number) -> Ok(number)
+    Error(_) -> int.parse(value) |> result.map(int.to_float)
+  }
+}",
+    )
+    |> append_if(
+      has(fn(t) { t == "optional(bool)" }),
+      "
+/// The values of an optional bool's select: blank, `true` or `false`.
+fn parse_bool(value: String) -> Result(Bool, Nil) {
+  case value {
+    \"true\" -> Ok(True)
+    \"false\" -> Ok(False)
+    _ -> Error(Nil)
+  }
+}",
+    )
+    |> string.concat
 
   "import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result" <> extra_imports <> "
-import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}
-import refrakt/validate
+import " <> app_name <> "/domain/" <> resource_singular <> ".{type " <> type_name <> "}" <> validate_import <> "
 import wisp
 
 pub type " <> type_name <> "Form {
@@ -1435,7 +1693,17 @@ fn get_value(data: wisp.FormData, key: String) -> String {
   |> result.map(fn(v) { v.1 })
   |> result.unwrap(\"\")
 }
-"
+" <> helpers
+}
+
+/// The parser `optional` and `must_parse` use for an optional field.
+fn optional_parser(field_type: String) -> String {
+  case base_type(field_type) {
+    "int" -> "int.parse"
+    "float" -> "parse_float"
+    "bool" -> "parse_bool"
+    _ -> "Ok"
+  }
 }
 
 fn resource_repo(
@@ -1450,6 +1718,84 @@ fn resource_repo(
       resource_repo_sqlite(app_name, resource_singular, type_name, fields)
     Postgres ->
       resource_repo_pog(app_name, resource_singular, type_name, fields)
+  }
+}
+
+/// The Sqlight decoder for one column.
+fn sqlite_decoder(field_type: String) -> String {
+  let decoder = case base_type(field_type) {
+    "bool" -> "sqlight.decode_bool()"
+    "int" -> "decode.int"
+    "float" -> "decode.float"
+    _ -> "decode.string"
+  }
+  case is_optional(field_type) {
+    True -> "decode.optional(" <> decoder <> ")"
+    False -> decoder
+  }
+}
+
+/// The Sqlight parameter for one field of the params.
+fn sqlite_parameter(name: String, field_type: String) -> String {
+  let encoder = case base_type(field_type) {
+    "bool" -> "sqlight.bool"
+    "int" -> "sqlight.int"
+    "float" -> "sqlight.float"
+    _ -> "sqlight.text"
+  }
+  case is_optional(field_type) {
+    // None is NULL
+    True -> "sqlight.nullable(" <> encoder <> ", params." <> name <> ")"
+    False -> encoder <> "(params." <> name <> ")"
+  }
+}
+
+/// The Pog decoder for one column.
+fn pog_decoder(field_type: String) -> String {
+  let decoder = case base_type(field_type) {
+    "bool" -> "decode.bool"
+    "int" -> "decode.int"
+    "float" -> "decode.float"
+    _ -> "decode.string"
+  }
+  case is_optional(field_type) {
+    True -> "decode.optional(" <> decoder <> ")"
+    False -> decoder
+  }
+}
+
+/// The Pog parameter for one field of the params.
+fn pog_parameter(name: String, field_type: String) -> String {
+  let encoder = case base_type(field_type) {
+    "bool" -> "pog.bool"
+    "int" -> "pog.int"
+    "float" -> "pog.float"
+    _ -> "pog.text"
+  }
+  case is_optional(field_type) {
+    // None is NULL
+    True -> "pog.nullable(" <> encoder <> ", params." <> name <> ")"
+    False -> encoder <> "(params." <> name <> ")"
+  }
+}
+
+/// A column in a Postgres SELECT or RETURNING list. Dates and timestamps
+/// are read as text, since the domain type holds them as strings.
+fn pog_select_column(field: #(String, String)) -> String {
+  case base_type(field.1) {
+    "date" | "datetime" -> field.0 <> "::text AS " <> field.0
+    _ -> field.0
+  }
+}
+
+/// The Postgres placeholder for a parameter. Dates and timestamps are sent
+/// as text and cast by Postgres.
+fn pog_placeholder(field: #(String, String), index: Int) -> String {
+  let placeholder = "$" <> int.to_string(index)
+  case base_type(field.1) {
+    "date" -> placeholder <> "::text::date"
+    "datetime" -> placeholder <> "::text::timestamptz"
+    _ -> placeholder
   }
 }
 
@@ -1468,12 +1814,7 @@ fn resource_repo_sqlite(
     fields
     |> list.index_map(fn(f, i) {
       let #(name, field_type) = f
-      let decode_fn = case field_type {
-        "bool" -> "sqlight.decode_bool()"
-        "int" -> "decode.int"
-        "float" -> "decode.float"
-        _ -> "decode.string"
-      }
+      let decode_fn = sqlite_decoder(field_type)
       "  use "
       <> name
       <> " <- decode.field("
@@ -1496,16 +1837,7 @@ fn resource_repo_sqlite(
 
   let insert_params =
     fields
-    |> list.map(fn(f) {
-      let #(name, field_type) = f
-      let sq_fn = case field_type {
-        "bool" -> "sqlight.bool"
-        "int" -> "sqlight.int"
-        "float" -> "sqlight.float"
-        _ -> "sqlight.text"
-      }
-      "    " <> sq_fn <> "(params." <> name <> "),"
-    })
+    |> list.map(fn(f) { "    " <> sqlite_parameter(f.0, f.1) <> "," })
     |> string.join("\n")
 
   let update_sets =
@@ -1687,18 +2019,15 @@ fn resource_repo_pog(
     |> list.map(fn(f) { f.0 })
     |> string.join(", ")
 
-  let select_fields = "id, " <> field_names
+  let select_fields =
+    ["id", ..list.map(fields, pog_select_column)]
+    |> string.join(", ")
 
   let decoder_fields =
     fields
     |> list.index_map(fn(f, i) {
       let #(name, field_type) = f
-      let decode_fn = case field_type {
-        "bool" -> "decode.bool"
-        "int" -> "decode.int"
-        "float" -> "decode.float"
-        _ -> "decode.string"
-      }
+      let decode_fn = pog_decoder(field_type)
       "  use "
       <> name
       <> " <- decode.field("
@@ -1716,26 +2045,19 @@ fn resource_repo_pog(
 
   let insert_placeholders =
     fields
-    |> list.index_map(fn(_, i) { "$" <> int.to_string(i + 1) })
+    |> list.index_map(fn(f, i) { pog_placeholder(f, i + 1) })
     |> string.join(", ")
 
   let insert_params =
     fields
     |> list.map(fn(f) {
-      let #(name, field_type) = f
-      let pog_fn = case field_type {
-        "bool" -> "pog.bool"
-        "int" -> "pog.int"
-        "float" -> "pog.float"
-        _ -> "pog.text"
-      }
-      "  |> pog.parameter(" <> pog_fn <> "(params." <> name <> "))"
+      "  |> pog.parameter(" <> pog_parameter(f.0, f.1) <> ")"
     })
     |> string.join("\n")
 
   let update_sets =
     fields
-    |> list.index_map(fn(f, i) { f.0 <> " = $" <> int.to_string(i + 1) })
+    |> list.index_map(fn(f, i) { f.0 <> " = " <> pog_placeholder(f, i + 1) })
     |> string.join(", ")
 
   let update_id_param = "$" <> int.to_string(list.length(fields) + 1)
@@ -1908,14 +2230,7 @@ fn resource_migration(
 ) -> String {
   let column_defs =
     fields
-    |> list.map(fn(f) {
-      let #(field_name, field_type) = f
-      let sql_type = case db {
-        Sqlite -> to_sql_type_sqlite(field_type)
-        _ -> to_sql_type(field_type)
-      }
-      "  " <> field_name <> " " <> sql_type <> " NOT NULL"
-    })
+    |> list.map(fn(f) { "  " <> f.0 <> " " <> column_definition(f, db) })
     |> string.join(",\n")
 
   let table = singularize(name) <> "s"
@@ -2110,8 +2425,9 @@ fn resource_test(
       let #(name, ftype) = f
       let val = case ftype {
         "bool" -> "on"
-        "int" -> "42"
-        "float" -> "3.14"
+        "optional(bool)" -> "true"
+        "int" | "optional(int)" -> "42"
+        "float" | "optional(float)" -> "3.14"
         _ -> "test value"
       }
       "    #(\"" <> name <> "\", \"" <> val <> "\"),"
@@ -2360,27 +2676,175 @@ fn add_route(content: String, route_line: String) -> String {
 // Field parsing and type conversion
 // =============================================================================
 
-pub fn parse_fields(raw: List(String)) -> List(#(String, String)) {
-  raw
-  |> list.filter_map(fn(field) {
-    case string.split(field, ":") {
-      [name, field_type] -> Ok(#(name, field_type))
-      _ -> Error(Nil)
+/// The field types `gen resource` knows, besides `optional(<type>)`.
+const field_types = [
+  "string",
+  "text",
+  "int",
+  "float",
+  "bool",
+  "date",
+  "datetime",
+]
+
+/// Parse `name:type` field specs. A type is one of `field_types` or
+/// `optional(<one of them>)`; the result holds the normalized type
+/// (`optional(float)`), or a message saying which spec is wrong.
+pub fn parse_fields(
+  raw: List(String),
+) -> Result(List(#(String, String)), String) {
+  use fields <- result.try(list.try_map(raw, parse_field))
+  case find_duplicate(list.map(fields, fn(f) { f.0 }), []) {
+    Ok(name) -> Error("Field `" <> name <> "` is given more than once.")
+    Error(_) -> Ok(fields)
+  }
+}
+
+/// Parse one `name:type` field spec, such as `price:optional(float)`.
+pub fn parse_field(spec: String) -> Result(#(String, String), String) {
+  case string.split_once(spec, ":") {
+    Error(_) ->
+      Error(
+        "Invalid field `"
+        <> spec
+        <> "`: expected name:type, such as title:string or price:optional(float).",
+      )
+    Ok(#(name, field_type)) -> {
+      use name <- result.try(check_field_name(name, spec))
+      use field_type <- result.try(parse_field_type(field_type, name))
+      Ok(#(name, field_type))
     }
-  })
+  }
+}
+
+fn check_field_name(name: String, spec: String) -> Result(String, String) {
+  let valid_chars = string.to_graphemes("abcdefghijklmnopqrstuvwxyz0123456789_")
+  let starts_with_letter = case string.pop_grapheme(name) {
+    Ok(#(first, _)) -> string.contains("abcdefghijklmnopqrstuvwxyz", first)
+    Error(_) -> False
+  }
+  let only_valid_chars =
+    list.all(string.to_graphemes(name), list.contains(valid_chars, _))
+  case name {
+    "id" | "inserted_at" | "updated_at" ->
+      Error(
+        "Invalid field `"
+        <> spec
+        <> "`: `"
+        <> name
+        <> "` is a column every resource already has.",
+      )
+    _ if starts_with_letter && only_valid_chars -> Ok(name)
+    _ ->
+      Error(
+        "Invalid field name in `"
+        <> spec
+        <> "`: use lowercase letters, digits and underscores, starting with a letter.",
+      )
+  }
+}
+
+fn parse_field_type(
+  field_type: String,
+  field_name: String,
+) -> Result(String, String) {
+  let field_type = string.lowercase(string.trim(field_type))
+  let unknown = fn(found: String) {
+    Error(
+      "Unknown type `"
+      <> found
+      <> "` for field `"
+      <> field_name
+      <> "`. Use one of: "
+      <> string.join(field_types, ", ")
+      <> ", or optional(<type>) for a nullable field, such as optional(float).",
+    )
+  }
+  case string.starts_with(field_type, "optional(") {
+    True ->
+      case string.ends_with(field_type, ")") {
+        False -> unknown(field_type)
+        True -> {
+          let inner =
+            field_type
+            |> string.drop_start(string.length("optional("))
+            |> string.drop_end(1)
+            |> string.trim
+          case list.contains(field_types, inner) {
+            True -> Ok("optional(" <> inner <> ")")
+            False -> unknown(field_type)
+          }
+        }
+      }
+    False ->
+      case list.contains(field_types, field_type) {
+        True -> Ok(field_type)
+        False -> unknown(field_type)
+      }
+  }
+}
+
+fn find_duplicate(
+  names: List(String),
+  seen: List(String),
+) -> Result(String, Nil) {
+  case names {
+    [] -> Error(Nil)
+    [name, ..rest] ->
+      case list.contains(seen, name) {
+        True -> Ok(name)
+        False -> find_duplicate(rest, [name, ..seen])
+      }
+  }
+}
+
+/// Whether a field type is `optional(<type>)`: a nullable column and an
+/// `Option` in Gleam.
+pub fn is_optional(field_type: String) -> Bool {
+  string.starts_with(field_type, "optional(")
+}
+
+/// The type inside `optional(<type>)`, or the type itself.
+pub fn base_type(field_type: String) -> String {
+  case is_optional(field_type) {
+    True ->
+      field_type
+      |> string.drop_start(string.length("optional("))
+      |> string.drop_end(1)
+    False -> field_type
+  }
 }
 
 pub fn to_gleam_type(field_type: String) -> String {
-  case field_type {
-    "string" -> "String"
-    "text" -> "String"
-    "int" -> "Int"
-    "float" -> "Float"
-    "bool" -> "Bool"
-    "date" -> "String"
-    "datetime" -> "String"
-    _ -> "String"
+  case is_optional(field_type) {
+    True -> "Option(" <> to_gleam_type(base_type(field_type)) <> ")"
+    False ->
+      case field_type {
+        "string" -> "String"
+        "text" -> "String"
+        "int" -> "Int"
+        "float" -> "Float"
+        "bool" -> "Bool"
+        "date" -> "String"
+        "datetime" -> "String"
+        _ -> "String"
+      }
   }
+}
+
+/// The column definition after the column name: the SQL type, and
+/// `NOT NULL` unless the field is optional.
+fn column_definition(field: #(String, String), db: DbChoice) -> String {
+  let #(_, field_type) = field
+  let sql_type = case db {
+    Sqlite -> to_sql_type_sqlite(base_type(field_type))
+    _ -> to_sql_type(base_type(field_type))
+  }
+  let null = case is_optional(field_type) {
+    True -> ""
+    False -> " NOT NULL"
+  }
+  sql_type <> null
 }
 
 pub fn to_sql_type(field_type: String) -> String {
@@ -2410,6 +2874,13 @@ fn to_sql_type_sqlite(field_type: String) -> String {
 }
 
 fn form_default_value(field_type: String) -> String {
+  case is_optional(field_type) {
+    True -> "None"
+    False -> plain_default_value(field_type)
+  }
+}
+
+fn plain_default_value(field_type: String) -> String {
   case field_type {
     "bool" -> "False"
     "int" -> "0"
@@ -3199,14 +3670,6 @@ fn capitalize(s: String) -> String {
   case string.pop_grapheme(s) {
     Ok(#(first, rest)) -> string.uppercase(first) <> rest
     Error(_) -> s
-  }
-}
-
-fn extract_flag_value(args: List(String), flag: String) -> Result(String, Nil) {
-  case args {
-    [] -> Error(Nil)
-    [f, value, ..] if f == flag -> Ok(value)
-    [_, ..rest] -> extract_flag_value(rest, flag)
   }
 }
 

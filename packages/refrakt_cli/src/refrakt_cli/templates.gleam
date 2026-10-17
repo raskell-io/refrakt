@@ -838,7 +838,13 @@ pub fn resource_domain_type(
       "\n",
     )
 
-  "pub type " <> type_name <> " {
+  // optional(T) fields are Option(T)
+  let option_import = case string.contains(field_defs, ": Option(") {
+    True -> "import gleam/option.{type Option}\n\n"
+    False -> ""
+  }
+
+  option_import <> "pub type " <> type_name <> " {
   " <> type_name <> "(
     id: Int,
 " <> field_defs <> "

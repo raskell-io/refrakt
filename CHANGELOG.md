@@ -6,6 +6,40 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `optional(T)` fields for `gen resource` (#35):
+  `'price:optional(float)'` is `Option(Float)` in the domain type, form
+  and params, and a nullable column on Postgres and SQLite. Repos bind
+  and decode `NULL` with `pog.nullable` / `sqlight.nullable` and
+  `decode.optional`. In HTML forms a blank input is `None`, optional
+  fields are not required, and a non-blank `optional(int)`,
+  `optional(float)` or `optional(bool)` that does not parse is a 422.
+  The form view renders `None` as empty, the show view as `—`.
+  `optional(bool)` is a blank/Yes/No select, since a checkbox cannot
+  say "not set". With `--api`, a missing key or `null` is `None`, and
+  `None` is encoded as `null`. All seven types can be optional.
+- The generated-project CI generates resources with optional fields
+  (HTML and `--api`) and checks NULLs, invalid optional values and JSON
+  `null` at runtime.
+
+### Changed
+
+- `gen resource` checks its arguments before writing anything: an
+  unknown field type (`title:strin` used to become a `String`), a spec
+  without a type, an invalid or repeated field name and an unknown
+  option are reported, and no files are written. `--belongs-to=<parent>`
+  works too.
+- Generated show views list every field (`<dl>`), not just the first
+  one. `index_view` and `show_view` label a record with its first
+  required string field, or `<Type> #<id>` when there is none (a first
+  field of another type no longer breaks the build).
+- Float inputs accept whole numbers (`4`) and have `step="any"`, so
+  browsers allow decimals.
+- Postgres repos read `date` and `datetime` columns as text and send
+  them as text for Postgres to cast, so these fields work as `String`s.
+- Generated form modules import `refrakt/validate` only when they use it.
+
 ## [0.5.0] - 2026-10-17
 
 Milestone 0.5, "safe to put in front of users": CSRF protection,

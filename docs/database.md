@@ -129,6 +129,16 @@ fn post_decoder() -> decode.Decoder(Post) {
 
 The field order must match the `SELECT` column order.
 
+An `optional(T)` field is a nullable column. The repo decodes it with
+`decode.optional(...)` and binds it with `pog.nullable` /
+`sqlight.nullable`, so `None` is `NULL`:
+
+```gleam
+use capacity <- decode.field(2, decode.optional(decode.int))
+// ...
+|> pog.parameter(pog.nullable(pog.int, params.capacity))
+```
+
 ## Migrations
 
 Migrations are plain SQL files in `src/<app>/data/migrations/`.
@@ -169,6 +179,8 @@ CREATE TABLE tasks (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
+
+Columns are `NOT NULL` except for `optional(T)` fields.
 
 ### Running migrations
 

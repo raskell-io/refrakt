@@ -5,7 +5,8 @@
 #   1. `refrakt_cli new app [--db ...]`, run from packages/refrakt_cli
 #   2. point the app at the in-repo library and CLI (path dependencies),
 #      so the check covers HEAD rather than whatever is on Hex
-#   3. `gen resource posts ...`, `gen resource memos ... --api`, `gen page
+#   3. `gen resource posts ...`, `gen resource memos ... --api`, resources
+#      with optional(T) fields, `gen page
 #      about`, and `gen auth` when the app has a database, all run through
 #      the app's own dev-dependency
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`
@@ -13,8 +14,8 @@
 #      multi-statement migration and a failing one that must roll back),
 #      check that APP_ENV=prod refuses a missing, development or short
 #      SECRET_KEY_BASE, boot the app and smoke-test /posts, CSRF
-#      rejection, the /api/memos JSON API and the register/login/logout
-#      flow with curl
+#      rejection, the /api/memos JSON API, optional fields, and the
+#      register/login/logout flow with curl
 #
 # Usage:
 #   .github/scripts/test-generated-app.sh <none|sqlite|postgres> [work-dir]
@@ -198,6 +199,128 @@ SQL
     fail "a second migrate applied migrations again"
 }
 
+# -----------------------------------------------------------------------------
+# optional(T) fields (#35)
+#
+# generate_optional_fields runs inside the app directory, after
+# `gen resource posts`. It generates
+#   - products: optional fields of every kind (HTML form)
+#   - gadgets: optional fields in an --api resource
+# and checks that an unknown field type is refused without writing files. smoke_test_optional_fields exercises them
+# against the running app.
+# -----------------------------------------------------------------------------
+
+generate_optional_fields() {
+  local output
+  cli gen resource products name:string 'price:optional(float)' \
+    'stock:optional(int)' 'note:optional(text)' 'featured:optional(bool)' \
+    'released:optional(date)'
+  cli gen resource gadgets label:string 'weight:optional(float)' \
+    'count:optional(int)' 'active:optional(bool)' 'code:optional(string)' --api
+
+  output="$(cli gen resource widgets 'size:optional(money)')"
+  echo "$output"
+  echo "$output" | grep -q "Unknown type" || fail "an unknown field type was not refused"
+  [ ! -e src/app/web/widget_handler.gleam ] || fail "an unknown field type wrote files"
+
+}
+
+# body_has <text> <what> / body_lacks <text> <what>: check the last response
+body_has() {
+  grep -qF -- "$1" "$work/body.html" || {
+    cat "$work/body.html" >&2
+    fail "$2: response lacks $1"
+  }
+}
+body_lacks() {
+  if grep -qF -- "$1" "$work/body.html"; then
+    cat "$work/body.html" >&2
+    fail "$2: response contains $1"
+  fi
+}
+
+# location -> the Location header of the last request made with
+# `-D "$work/headers"`
+location() {
+  grep -i "^location:" "$work/headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//'
+}
+
+smoke_test_optional_fields() {
+  local product_path value
+
+  step "Smoke-testing optional fields (/products)"
+  expect 303 "$(status POST /products -D "$work/headers" \
+    --data-urlencode "name=All blank" --data-urlencode "price=" \
+    --data-urlencode "stock=" --data-urlencode "note=" \
+    --data-urlencode "featured=" --data-urlencode "released=")" \
+    "POST /products with blank optional fields"
+  product_path="$(location)"
+  [ -n "$product_path" ] || fail "POST /products did not redirect to the product"
+  expect 200 "$(status GET "$product_path")" "GET $product_path"
+  body_has "All blank" "GET $product_path"
+  # price, stock, note, featured and released are NULL: an em dash each
+  [ "$(grep -o '<dd>—</dd>' "$work/body.html" | wc -l | tr -d ' ')" = 5 ] || {
+    cat "$work/body.html" >&2
+    fail "GET $product_path: blank optional fields do not show as —"
+  }
+  echo "ok  blank optional fields are NULL and show as —"
+  expect 200 "$(status GET "$product_path/edit")" "GET $product_path/edit"
+  # Lustre sorts attributes and writes an empty value as a bare `value`
+  body_has '<input name="price" step="any" type="number" value>' \
+    "GET $product_path/edit renders a NULL price as blank"
+  body_has '<option selected value>' "GET $product_path/edit selects the blank featured"
+
+  expect 303 "$(status POST /products -D "$work/headers" \
+    --data-urlencode "name=All set" --data-urlencode "price=4" \
+    --data-urlencode "stock=7" --data-urlencode "note=Handle with care" \
+    --data-urlencode "featured=true" --data-urlencode "released=2026-10-17")" \
+    "POST /products with optional values"
+  product_path="$(location)"
+  expect 200 "$(status GET "$product_path")" "GET $product_path"
+  for value in "<dd>4.0</dd>" "<dd>7</dd>" "<dd>Handle with care</dd>" \
+    "<dd>Yes</dd>" "<dd>2026-10-17</dd>"; do
+    body_has "$value" "GET $product_path"
+  done
+  echo "ok  optional values round-trip"
+
+  expect 422 "$(status POST /products --data-urlencode "name=Bad price" \
+    --data-urlencode "price=cheap")" "POST /products with a price that is not a number"
+  body_has "Price must be a number" "POST /products with a bad price"
+  expect 422 "$(status POST /products --data-urlencode "name=Bad stock" \
+    --data-urlencode "stock=1.5")" "POST /products with a stock that is not a whole number"
+  expect 422 "$(status POST /products --data-urlencode "name=Bad flag" \
+    --data-urlencode "featured=maybe")" "POST /products with a featured that is not yes/no"
+
+  expect 303 "$(status POST "$product_path?_method=PUT" \
+    --data-urlencode "name=All set" --data-urlencode "price=" \
+    --data-urlencode "stock=7" --data-urlencode "featured=false")" \
+    "PUT $product_path clearing the price"
+  expect 200 "$(status GET "$product_path")" "GET $product_path after clearing the price"
+  body_has "<dd>No</dd>" "GET $product_path after update"
+  body_lacks "<dd>4.0</dd>" "GET $product_path after clearing the price"
+
+  step "Smoke-testing optional fields in the JSON API (/api/gadgets)"
+  expect 201 "$(api POST /api/gadgets \
+    '{"label":"Nulls","weight":null,"count":null,"active":null,"code":null}')" \
+    "POST /api/gadgets with null optional fields"
+  for value in '"weight":null' '"count":null' '"active":null' '"code":null'; do
+    api_body_has "$value" "POST /api/gadgets with nulls"
+  done
+  expect 201 "$(api POST /api/gadgets '{"label":"Missing"}')" \
+    "POST /api/gadgets with optional fields left out"
+  api_body_has '"weight":null' "POST /api/gadgets with missing keys"
+  api_body_has '"count":null' "POST /api/gadgets with missing keys"
+  expect 201 "$(api POST /api/gadgets \
+    '{"label":"Values","weight":2,"count":3,"active":false,"code":"G-1"}')" \
+    "POST /api/gadgets with optional values"
+  for value in '"weight":2.0' '"count":3' '"active":false' '"code":"G-1"'; do
+    api_body_has "$value" "POST /api/gadgets with values"
+  done
+  expect 400 "$(api POST /api/gadgets '{"label":"Bad","count":"many"}')" \
+    "POST /api/gadgets with a count that is not a number"
+
+}
+
 rm -rf "$app_dir"
 
 step "Generating app (db: $db) in $app_dir"
@@ -236,6 +359,7 @@ else
   # JSON API resources (--api); see smoke_test_json_api below
   cli gen resource memos title:string body:text pinned:bool rating:int --api
   cli gen resource readings value:float count:int --api
+  generate_optional_fields
 fi
 cli gen page about
 if [ "$db" != none ]; then
@@ -529,5 +653,6 @@ grep -i "^set-cookie: _session=" "$work/logout.headers" | grep -q "Max-Age=0" ||
 echo "ok  logout clears the session cookie"
 
 smoke_test_json_api
+smoke_test_optional_fields
 
 step "OK ($db)"
