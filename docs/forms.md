@@ -125,12 +125,36 @@ let errors =
 | `min_length(errors, value, field, min, message)` | String has at least `min` characters |
 | `max_length(errors, value, field, max, message)` | String has at most `max` characters |
 | `inclusion(errors, value, field, allowed, message)` | Value is in the allowed list |
+| `email(errors, value, field, message)` | Value looks like an email address |
+| `int_between(errors, value, field, min, max, message)` | Value parses as an integer in `min`..`max`, inclusive |
+| `float_between(errors, value, field, min, max, message)` | Value parses as a float in `min`..`max`, inclusive |
+| `confirmation(errors, value, confirmation, field, message)` | `value` equals `confirmation` |
 | `format(errors, value, field, predicate, message)` | Custom predicate returns `True` |
 
 All validators:
 - Take the error list as the first argument (for piping)
-- Skip the check if the field already has an error (no duplicate messages)
 - Return the updated error list
+
+`min_length`, `max_length`, `int_between`, `float_between` and `confirmation`
+also skip the check when the field already has an error, so a field reports
+one message at a time. `required`, `inclusion`, `email` and `format` always
+add their message when the value does not pass, so put `required` first:
+
+```gleam
+let errors =
+  []
+  |> validate.required(email, "email", "Email is required")
+  |> validate.email(email, "email", "Must be a valid email")
+  |> validate.required(password, "password", "Password is required")
+  |> validate.min_length(password, "password", 8, "Password must be 8 characters or more")
+  |> validate.confirmation(password, password_repeat, "password", "Passwords do not match")
+  |> validate.int_between(age, "age", 13, 120, "Age must be between 13 and 120")
+```
+
+`email` is a pragmatic check, not a RFC 5322 parser: the trimmed value needs
+one `@`, a non-empty local part without spaces, and a domain with at least two
+non-empty dot-separated labels. `confirmation` compares the two values as
+given, without trimming, because passwords may contain spaces.
 
 ### Custom validation
 

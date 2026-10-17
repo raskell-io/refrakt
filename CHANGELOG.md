@@ -12,6 +12,14 @@ The first release on Hex since 0.2.0. Versions 0.3.0 and 0.4.0 were
 tagged but never reached Hex, so everything listed under them ships
 here, including the Upgrading notes in 0.4.0.
 
+### Added
+
+- `validate` gained `email`, `int_between`, `float_between` and
+  `confirmation`, so forms no longer hand-write those checks. `email` is a
+  pragmatic check (one `@`, non-empty local part, dotted domain), the range
+  checks fail on values that do not parse as a number, and `confirmation`
+  compares two values without trimming them. Thanks to @ElectLive (#24, #29).
+
 ### Fixed
 
 - The release workflow passed without publishing: Gleam asks for a
