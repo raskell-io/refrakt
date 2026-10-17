@@ -170,7 +170,10 @@ case show_sidebar {
 `refrakt gen resource posts title:string body:text published:bool`
 creates three view functions:
 
-- `index_view(posts)` — list all items with links
+- `index_view(page)` — one page of items (`paginate.Page(Post)`) with
+  links, plus "Previous"/"Next" links and "Page 2 of 5" from a private
+  `pagination` function that uses `paginate.previous_page`,
+  `paginate.next_page` and `paginate.page_path`
 - `show_view(post)` — show a single item with edit link
 - `form_view(values, errors)` — form with fields and validation errors
 

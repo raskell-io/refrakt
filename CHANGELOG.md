@@ -6,6 +6,77 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Pagination (repos):** generated `list` functions now take
+  `paginate.Params` and return `paginate.Page(item)`. In each
+  `data/<singular>_repo.gleam`, add `import refrakt/paginate`, add
+  `LIMIT`/`OFFSET` to the `list` query and a `SELECT COUNT(*)`, and
+  return `paginate.page(items, params, total)`; copy `list` from a
+  freshly generated repo (see [Database](docs/database.md#pagination)).
+  Keep the old function under another name (`all`) if something needs
+  every row.
+- **Pagination (HTML):** in each `<singular>_handler.gleam`, add
+  `pub const per_page = 20` and build the params in `index` with
+  `paginate.Params(page: paginate.page_number(req), per_page:)` (rename
+  `_req` to `req`). In `<singular>_views.gleam`, `index_view` takes
+  `paginate.Page(Post)` and maps over `page.items`; copy the
+  `pagination` function from a fresh view and add `rel`, `nav` and
+  `span` to the imports. New apps get a `.pagination` rule in
+  `priv/static/css/app.css`.
+- **Pagination (JSON API):** `GET /api/<resource>` no longer answers a
+  bare array. It answers
+  `{"data": [...], "page": 1, "per_page": 20, "total": 3, "total_pages": 1}`
+  and reads `?page=` and `?per_page=` (at most 100). Update API clients
+  to read `data`. In the handler, add `pub const per_page = 20` and
+  build the envelope as a fresh `gen resource ... --api` does.
+- **Test database:** copy `test/<app>/support/test_db.gleam` from a
+  freshly generated app with the same database (or run any `gen
+  resource` or `gen auth`, which writes it when it is missing). On
+  Postgres, create the test database once:
+  `createdb -h localhost -U postgres <app>_test`, and do the same in
+  CI before `gleam test`.
+- **Dependencies:** bump `refrakt` to the release with
+  `testing.with_database`, `migrate.run_quietly` and the new
+  `paginate` functions.
+
+### Added
+
+- `testing.with_database(open:, close:, run:)` runs a test against a
+  database and always closes it, also after a failed assertion. It
+  knows no database driver.
+- `migrate.run_quietly` applies migrations like `migrate.run` without
+  printing, for test databases.
+- `gen resource` and `gen auth` write `test/<app>/support/test_db.gleam`
+  when the app has none. Its `with_context` gives a test a `Context` on
+  a real, migrated database that is left clean: on Postgres a
+  transaction on `<app>_test` (or `DATABASE_URL`) that is always
+  rolled back, on SQLite a fresh shared-cache in-memory database per
+  test (#21).
+- Generated resource tests create, show, update and delete a record
+  through the router and page through the index against the test
+  database; `--api` resources do the same with JSON. Generated auth
+  tests register and log in (#21).
+- `paginate.page_number`, `paginate.from_request_with(req, per_page:)`,
+  `paginate.previous_page`, `paginate.next_page`, `paginate.page_path`
+  and `paginate.max_per_page`.
+- The generated-project CI creates `app_test` on Postgres so the
+  DB-backed tests run, and checks pagination of `/posts` and
+  `/api/memos` with curl.
+
+### Changed
+
+- Generated resources paginate (#22): `repo.list(db, params)` returns a
+  `paginate.Page` with `LIMIT`/`OFFSET` and a total count, the HTML
+  index reads `?page=` (missing, invalid or negative is page 1) and
+  renders previous/next links, and the page size is
+  `pub const per_page = 20` in each handler. The JSON API index answers
+  a `data` envelope with `page`, `per_page`, `total` and `total_pages`.
+- `paginate.from_request` reads the query with `wisp.get_query`, so
+  percent-encoded values decode, and `paginate.page` and
+  `paginate.offset` treat a `per_page` below 1 as 1.
+- The README of a new app with a database explains the test database.
+
 ## [0.5.0] - 2026-10-17
 
 Milestone 0.5, "safe to put in front of users": CSRF protection,

@@ -48,7 +48,24 @@ erl_crash.dump
 "
 }
 
-pub fn readme(name: String) -> String {
+pub fn readme(name: String, db: DbChoice) -> String {
+  let test_database = case db {
+    Postgres -> "
+Tests that use the database run against `" <> name <> "_test` (or
+`DATABASE_URL`), each in a transaction that is rolled back. Create it once:
+
+```bash
+createdb -h localhost -U postgres " <> name <> "_test
+```
+"
+    Sqlite ->
+      "
+Tests that use the database get a fresh in-memory SQLite database each,
+with the migrations applied.
+"
+    NoDb -> ""
+  }
+
   "# " <> name <> "
 
 A web application built with [Refrakt](https://github.com/raskell-io/refrakt).
@@ -59,7 +76,7 @@ A web application built with [Refrakt](https://github.com/raskell-io/refrakt).
 gleam run    # Start the server at http://localhost:4000
 gleam test   # Run tests
 ```
-
+" <> test_database <> "
 ## Generators
 
 The Refrakt code generator is a dev-dependency of this project:
@@ -597,6 +614,13 @@ a:hover {
   display: flex;
   gap: 0.5rem;
 }
+
+.pagination {
+  margin-top: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
 "
 }
 
@@ -677,6 +701,237 @@ fn test_context() -> Context {
 "
 }
 
+/// `test/<app>/support/test_db.gleam`: a real, migrated database for
+/// tests that need one. `gen resource` and `gen auth` write it when it is
+/// missing.
+pub fn test_db_module(name: String, db: DbChoice) -> String {
+  case db {
+    Postgres -> test_db_postgres(name)
+    Sqlite -> test_db_sqlite(name)
+    NoDb -> ""
+  }
+}
+
+fn test_db_postgres(name: String) -> String {
+  "//// A real, migrated database for tests.
+////
+//// `with_context` runs a test with a `Context` whose database is a
+//// transaction on the test database, with the migrations in
+//// src/" <> name <> "/data/migrations applied inside it. The transaction is
+//// always rolled back, also when the test fails, so every test starts
+//// from empty tables and leaves nothing behind.
+////
+//// ```gleam
+//// pub fn create_post_test() {
+////   use ctx <- test_db.with_context()
+////   // ... send requests through router.handle_request(req, ctx)
+//// }
+//// ```
+////
+//// The test database is `DATABASE_URL`, or
+//// postgres://postgres@localhost:5432/" <> name <> "_test when it is unset.
+//// Create it once:
+////
+////     createdb -h localhost -U postgres " <> name <> "_test
+////
+//// Everything a test does runs in that one transaction, so the code under
+//// test must not start its own with `pog.transaction`: its COMMIT would
+//// end the test's transaction. After a failing query, such as a unique
+//// constraint violation, Postgres refuses further queries in the
+//// transaction, so make that the last query of a test.
+
+import envoy
+import gleam/dynamic/decode
+import gleam/erlang/process
+import gleam/list
+import gleam/result
+import gleam/string
+import " <> name <> "/config
+import " <> name <> "/context.{type Context}
+import pog
+import refrakt/migrate
+import refrakt/testing
+
+const default_url = \"postgres://postgres@localhost:5432/" <> name <> "_test\"
+
+const migrations_dir = \"src/" <> name <> "/data/migrations\"
+
+/// Run `body` with a context on a rolled-back transaction of the test
+/// database.
+pub fn with_context(body: fn(Context) -> a) -> a {
+  let assert Ok(cfg) = config.load()
+  let cfg = config.Config(..cfg, env: config.Test)
+  use #(_pid, pool) <- testing.with_database(open: start_pool, close: stop_pool)
+
+  let outcome =
+    pog.transaction(pool, fn(conn) {
+      // pog rolls the transaction back when the callback returns an Error,
+      // so the test's result travels out inside one.
+      Error(
+        migrate_in_transaction(conn)
+        |> result.map(fn(_) { body(context.Context(config: cfg, db: conn)) }),
+      )
+    })
+
+  case outcome {
+    Error(pog.TransactionRolledBack(Ok(value))) -> value
+    Error(pog.TransactionRolledBack(Error(message))) -> panic as message
+    Error(pog.TransactionQueryError(error)) ->
+      panic as {
+        \"Could not use the test database at \"
+        <> database_url()
+        <> \": \"
+        <> string.inspect(error)
+        <> \". Is Postgres running? Create the database with \"
+        <> \"`createdb -h localhost -U postgres " <> name <> "_test`.\"
+      }
+    Ok(_) -> panic as \"unreachable: the test transaction is always rolled back\"
+  }
+}
+
+fn database_url() -> String {
+  envoy.get(\"DATABASE_URL\")
+  |> result.unwrap(default_url)
+}
+
+/// A pool of one connection, for one test.
+fn start_pool() -> Result(#(process.Pid, pog.Connection), String) {
+  let name = process.new_name(prefix: \"" <> name <> "_test_db\")
+  use config <- result.try(
+    pog.url_config(name, database_url())
+    |> result.replace_error(\"not a Postgres URL: \" <> database_url()),
+  )
+  config
+  |> pog.pool_size(1)
+  |> pog.start
+  |> result.map(fn(started) { #(started.pid, started.data) })
+  |> result.map_error(string.inspect)
+}
+
+/// The pool was started by this process, so an exit signal from it shuts
+/// the pool down cleanly and closes its connection.
+fn stop_pool(pool: #(process.Pid, pog.Connection)) -> Nil {
+  process.send_exit(pool.0)
+}
+
+/// Apply the migrations on the test's connection. They run statement by
+/// statement without a transaction of their own: the test's transaction
+/// holds them, and its rollback undoes them.
+fn migrate_in_transaction(conn: pog.Connection) -> Result(Int, String) {
+  migrate.run_quietly(
+    migrations_dir,
+    query: fn(sql) {
+      pog.query(sql)
+      |> pog.returning(decode.at([0], decode.string))
+      |> pog.execute(conn)
+      |> result.map(fn(returned) { returned.rows })
+      |> result.map_error(string.inspect)
+    },
+    transaction: fn(scripts) {
+      scripts
+      |> list.flat_map(migrate.split_statements)
+      |> list.try_each(fn(statement) {
+        pog.query(statement)
+        |> pog.execute(conn)
+        |> result.map_error(fn(error) {
+          string.inspect(error) <> \"\\n  in statement: \" <> statement
+        })
+      })
+    },
+  )
+  |> result.map_error(fn(error) {
+    \"Could not migrate the test database: \" <> error
+  })
+}
+"
+}
+
+fn test_db_sqlite(name: String) -> String {
+  "//// A real, migrated database for tests.
+////
+//// `with_context` runs a test with a `Context` on a fresh in-memory
+//// SQLite database, with the migrations in src/" <> name <> "/data/migrations
+//// applied. The database lives as long as the test: when the test ends,
+//// also when it fails, it is gone, so every test starts from empty tables.
+////
+//// ```gleam
+//// pub fn create_post_test() {
+////   use ctx <- test_db.with_context()
+////   // ... send requests through router.handle_request(req, ctx)
+//// }
+//// ```
+
+import gleam/dynamic/decode
+import gleam/int
+import gleam/list
+import gleam/result
+import " <> name <> "/config
+import " <> name <> "/context.{type Context}
+import refrakt/migrate
+import refrakt/testing
+import sqlight
+
+const migrations_dir = \"src/" <> name <> "/data/migrations\"
+
+/// Run `body` with a context on a fresh, migrated in-memory database.
+pub fn with_context(body: fn(Context) -> a) -> a {
+  let assert Ok(cfg) = config.load()
+  let cfg = config.Config(..cfg, env: config.Test)
+  // Repos open a connection per query from `ctx.db_path`. A named
+  // in-memory database with a shared cache is the same database for all
+  // of them while one connection stays open; it disappears when the last
+  // connection closes.
+  let path =
+    \"file:" <> name <> "_test_\"
+    <> int.to_string(int.random(1_000_000_000))
+    <> \"?mode=memory&cache=shared\"
+  use _keep_open <- testing.with_database(
+    open: fn() { open(path) },
+    close: close,
+  )
+  body(context.Context(config: cfg, db_path: path))
+}
+
+fn open(path: String) -> Result(sqlight.Connection, String) {
+  use conn <- result.try(
+    sqlight.open(path)
+    |> result.map_error(fn(error) { error.message }),
+  )
+  case migrate(conn) {
+    Ok(_) -> Ok(conn)
+    Error(error) -> {
+      close(conn)
+      Error(error)
+    }
+  }
+}
+
+fn close(conn: sqlight.Connection) -> Nil {
+  let _ = sqlight.close(conn)
+  Nil
+}
+
+fn migrate(conn: sqlight.Connection) -> Result(Int, String) {
+  migrate.run_quietly(
+    migrations_dir,
+    query: fn(sql) {
+      sqlight.query(sql, on: conn, with: [], expecting: decode.at([0], decode.string))
+      |> result.map_error(fn(error) { error.message })
+    },
+    // A fresh database per test: a failed migration fails the test, so
+    // there is nothing to roll back.
+    transaction: fn(scripts) {
+      list.try_each(scripts, fn(script) {
+        sqlight.exec(script, on: conn)
+        |> result.map_error(fn(error) { error.message })
+      })
+    },
+  )
+  |> result.map_error(fn(error) { \"the migrations failed: \" <> error })
+}
+"
+}
+
 /// Imports and the `Context` expression a generated test uses to call the
 /// router. The database is never opened: the tests only take paths that
 /// do not reach a repo.
@@ -718,11 +973,18 @@ import " <> app_name <> "/web/forms/" <> resource_singular <> "_form
 import " <> app_name <> "/web/layouts/root_layout
 import " <> app_name <> "/web/" <> resource_singular <> "_views
 import refrakt/flash
+import refrakt/paginate
 import wisp.{type Request, type Response}
 
-pub fn index(_req: Request, ctx: Context) -> Response {
-  let items = " <> resource_singular <> "_repo.list(" <> db_arg <> ")
-  " <> resource_singular <> "_views.index_view(items)
+/// How many " <> resource_plural <> " the index shows per page.
+pub const per_page = 20
+
+/// `GET /" <> resource_plural <> "?page=2`. A missing, invalid or negative page is page 1.
+pub fn index(req: Request, ctx: Context) -> Response {
+  let params = paginate.Params(page: paginate.page_number(req), per_page:)
+
+  " <> resource_singular <> "_repo.list(" <> db_arg <> ", params)
+  |> " <> resource_singular <> "_views.index_view
   |> root_layout.wrap(\"" <> type_name <> "s\")
   |> wisp.html_response(200)
 }

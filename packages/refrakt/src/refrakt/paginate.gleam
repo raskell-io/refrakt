@@ -1,39 +1,52 @@
-//// Pagination helpers for list views.
+//// Pagination helpers for list views and JSON APIs.
+////
+//// Pages are numbered from 1 and fetched with `LIMIT` and `OFFSET`. That
+//// works with any `ORDER BY`, lets visitors jump to any page and gives a
+//// total count; for very large tables or infinite scrolling, paginate by
+//// key (`WHERE id < $last_id`) instead.
+////
+//// ## Usage in a repo
+////
+//// ```gleam
+//// pub fn list(db: pog.Connection, params: paginate.Params) -> paginate.Page(Post) {
+////   let posts =
+////     pog.query("SELECT ... ORDER BY id DESC LIMIT $1 OFFSET $2")
+////     |> pog.parameter(pog.int(params.per_page))
+////     |> pog.parameter(pog.int(paginate.offset(params)))
+////     ...
+////   let total = // SELECT COUNT(*) FROM posts
+////   paginate.page(posts, params, total)
+//// }
+//// ```
 ////
 //// ## Usage in a handler
 ////
 //// ```gleam
-//// import refrakt/paginate
+//// const per_page = 20
 ////
 //// pub fn index(req: Request, ctx: Context) -> Response {
-////   let params = paginate.from_request(req)
-////   let posts = post_repo.list_paginated(ctx.db, params)
-////   let page = paginate.page(posts, params, total_count)
+////   let params = paginate.Params(page: paginate.page_number(req), per_page:)
 ////
-////   post_views.index_view(page)
+////   post_repo.list(ctx.db, params)
+////   |> post_views.index_view
 ////   |> root_layout.wrap("Posts")
 ////   |> wisp.html_response(200)
 //// }
 //// ```
 ////
-//// ## Usage in a repo
+//// ## Usage in a view
 ////
 //// ```gleam
-//// pub fn list_paginated(db, params: paginate.Params) -> List(Post) {
-////   let offset = paginate.offset(params)
-////   pog.query("SELECT ... LIMIT $1 OFFSET $2")
-////   |> pog.parameter(pog.int(params.per_page))
-////   |> pog.parameter(pog.int(offset))
-////   ...
+//// case paginate.next_page(page) {
+////   Ok(next) -> a([href(paginate.page_path("/posts", next))], [text("Next")])
+////   Error(_) -> text("")
 //// }
 //// ```
 ////
 
 import gleam/int
 import gleam/list
-import gleam/option
 import gleam/result
-import gleam/string
 import wisp.{type Request}
 
 /// Pagination parameters.
@@ -54,51 +67,89 @@ pub type Page(item) {
   )
 }
 
+/// The largest `per_page` that `from_request` and `from_request_with`
+/// accept from a query string.
+pub const max_per_page = 100
+
 /// Default pagination: page 1, 20 items per page.
 pub fn default_params() -> Params {
   Params(page: 1, per_page: 20)
 }
 
-/// Extract pagination params from query string (?page=2&per_page=10).
+/// Extract pagination params from the query string
+/// (`?page=2&per_page=10`), with 20 items per page by default.
 pub fn from_request(req: Request) -> Params {
-  let query_params = parse_query(req.query)
+  from_request_with(req, per_page: 20)
+}
 
-  let page =
-    find_param(query_params, "page")
-    |> result.try(int.parse)
-    |> result.unwrap(1)
-    |> int.max(1)
-
+/// Extract pagination params from the query string (`?page=2&per_page=10`),
+/// with `per_page` items per page when the query has no valid `per_page`.
+/// A `per_page` from the query is kept between 1 and `max_per_page`.
+pub fn from_request_with(req: Request, per_page default: Int) -> Params {
   let per_page =
-    find_param(query_params, "per_page")
+    wisp.get_query(req)
+    |> list.key_find("per_page")
     |> result.try(int.parse)
-    |> result.unwrap(20)
-    |> int.clamp(1, 100)
+    |> result.map(int.clamp(_, 1, max_per_page))
+    |> result.unwrap(int.max(default, 1))
 
-  Params(page:, per_page:)
+  Params(page: page_number(req), per_page:)
+}
+
+/// The page number from the `page` query parameter. A missing, invalid,
+/// zero or negative page number is page 1.
+pub fn page_number(req: Request) -> Int {
+  wisp.get_query(req)
+  |> list.key_find("page")
+  |> result.try(int.parse)
+  |> result.unwrap(1)
+  |> int.max(1)
 }
 
 /// Calculate the SQL OFFSET from pagination params.
 pub fn offset(params: Params) -> Int {
-  { params.page - 1 } * params.per_page
+  { int.max(params.page, 1) - 1 } * int.max(params.per_page, 1)
 }
 
 /// Build a Page from items, params, and total count.
 pub fn page(items: List(item), params: Params, total: Int) -> Page(item) {
+  let per_page = int.max(params.per_page, 1)
   let total_pages = case total {
     0 -> 1
-    _ -> { total + params.per_page - 1 } / params.per_page
+    _ -> { total + per_page - 1 } / per_page
   }
 
   Page(
     items:,
     page: params.page,
-    per_page: params.per_page,
+    per_page:,
     total:,
     total_pages:,
     has_previous: params.page > 1,
     has_next: params.page < total_pages,
   )
+}
+
+/// The number of the page before this one. Past the last page, it is the
+/// last page, so a visitor who followed a stale link can get back.
+pub fn previous_page(page: Page(item)) -> Result(Int, Nil) {
+  case page.page > 1 {
+    True -> Ok(int.min(page.page - 1, page.total_pages))
+    False -> Error(Nil)
+  }
+}
+
+/// The number of the page after this one, if there is one.
+pub fn next_page(page: Page(item)) -> Result(Int, Nil) {
+  case page.has_next {
+    True -> Ok(page.page + 1)
+    False -> Error(Nil)
+  }
+}
+
+/// The path of a page: `page_path("/posts", 2)` is `"/posts?page=2"`.
+pub fn page_path(base_path: String, page_num: Int) -> String {
+  base_path <> "?page=" <> int.to_string(page_num)
 }
 
 /// Generate a pagination query string for a given page number.
@@ -108,27 +159,4 @@ pub fn page_url(base_path: String, page_num: Int, per_page: Int) -> String {
   <> int.to_string(page_num)
   <> "&per_page="
   <> int.to_string(per_page)
-}
-
-fn parse_query(query: option.Option(String)) -> List(#(String, String)) {
-  case query {
-    option.Some(q) ->
-      q
-      |> string.split("&")
-      |> list.filter_map(fn(pair) {
-        case string.split_once(pair, "=") {
-          Ok(#(k, v)) -> Ok(#(k, v))
-          Error(_) -> Error(Nil)
-        }
-      })
-    option.None -> []
-  }
-}
-
-fn find_param(
-  params: List(#(String, String)),
-  key: String,
-) -> Result(String, Nil) {
-  list.find(params, fn(p) { p.0 == key })
-  |> result.map(fn(p) { p.1 })
 }
