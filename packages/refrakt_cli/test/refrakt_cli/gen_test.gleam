@@ -285,6 +285,94 @@ pub fn gen_two_resources_no_duplication_test() {
 }
 
 // =============================================================================
+// gen resource --api
+// =============================================================================
+
+pub fn gen_api_resource_creates_json_handlers_test() {
+  in_temp_dir("gen_api", fn(dir) {
+    let project_dir = dir <> "/api_app"
+    new.run(project_dir, ["--db", "sqlite"])
+
+    let assert Ok(cwd) = current_directory()
+    let assert Ok(_) = set_cwd(project_dir)
+
+    gen.resource("notes", [
+      "title:string", "body:text", "pinned:bool", "rating:int", "--api",
+    ])
+
+    let handler = "src/api_app/web/note_handler.gleam"
+    let form = "src/api_app/web/forms/note_form.gleam"
+    let test_file = "test/api_app/web/note_handler_test.gleam"
+
+    // No HTML views in API mode
+    file_exists("src/api_app/web/note_views.gleam") |> should.be_false
+
+    // create and update are implemented
+    file_contains(handler, "501") |> should.be_false
+    file_contains(handler, "not implemented") |> should.be_false
+    file_contains(handler, "note_form.decode_json(body)") |> should.be_true
+    file_contains(handler, "json_response(to_json(item), 201)")
+    |> should.be_true
+    file_contains(handler, "\"location\"") |> should.be_true
+    file_contains(handler, "wisp.no_content()") |> should.be_true
+    file_contains(handler, "|> json_response(422)") |> should.be_true
+    file_contains(handler, "|> json_response(400)") |> should.be_true
+
+    // The params module decodes JSON and validates like the HTML form
+    file_contains(form, "pub fn decode_json(data: Dynamic)") |> should.be_true
+    file_contains(form, "decode.optional_field(\"rating\", 0, decode.int)")
+    |> should.be_true
+    file_contains(
+      form,
+      "validate.required(params.title, \"title\", \"Title is required\")",
+    )
+    |> should.be_true
+    file_contains(form, "validate.required(params.body,") |> should.be_true
+
+    // Generated tests drive the handlers with JSON requests
+    file_contains(test_file, "testing.json_request(http.Post, \"/api/notes\"")
+    |> should.be_true
+    file_contains(test_file, "should.equal(422)") |> should.be_true
+    file_contains(test_file, "db_path: \":memory:\"") |> should.be_true
+
+    // Routes live under /api
+    file_contains("src/api_app/router.gleam", "[\"api\", \"notes\", id]")
+    |> should.be_true
+
+    let assert Ok(_) = set_cwd(cwd)
+    Nil
+  })
+}
+
+pub fn gen_api_resource_without_required_fields_test() {
+  in_temp_dir("gen_api_numbers", fn(dir) {
+    let project_dir = dir <> "/num_app"
+    new.run(project_dir, ["--db", "postgres"])
+
+    let assert Ok(cwd) = current_directory()
+    let assert Ok(_) = set_cwd(project_dir)
+
+    gen.resource("readings", ["value:float", "count:int", "--api"])
+
+    let form = "src/num_app/web/forms/reading_form.gleam"
+    let test_file = "test/num_app/web/reading_handler_test.gleam"
+
+    // Nothing to validate: no unused import or parameter
+    file_contains(form, "import refrakt/validate") |> should.be_false
+    file_contains(form, "validate_params(_params: ReadingParams)")
+    |> should.be_true
+    // JSON numbers without a fraction still decode as Float
+    file_contains(form, "fn float_or_int() -> decode.Decoder(Float)")
+    |> should.be_true
+    file_contains(test_file, "should.equal(422)") |> should.be_false
+    file_contains(test_file, "pog.named_connection") |> should.be_true
+
+    let assert Ok(_) = set_cwd(cwd)
+    Nil
+  })
+}
+
+// =============================================================================
 // gen page
 // =============================================================================
 

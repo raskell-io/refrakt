@@ -177,10 +177,7 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
     True -> {
       // API mode still needs the Params type for repos
       let assert Ok(_) =
-        simplifile.write(
-          form_path,
-          api_params_module(app, singular, type_name, fields),
-        )
+        simplifile.write(form_path, api_params_module(type_name, fields))
       [handler_path, form_path, domain_path, repo_path, test_path]
     }
   }
@@ -202,7 +199,7 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
 
   let assert Ok(_) =
     simplifile.write(test_path, case api_mode {
-      True -> api_resource_test(app, singular)
+      True -> api_resource_test(app, name, singular, db, fields)
       False -> resource_test(app, name, singular, fields, db)
     })
 
@@ -674,12 +671,73 @@ pub fn script_tag() -> Element(Nil) {
 // Resource template helpers
 // =============================================================================
 
+// --api resources -------------------------------------------------------------
+//
+// An --api resource answers JSON under /api/<plural>. Its params module
+// (web/forms/<singular>_form.gleam) decodes and validates the request body
+// with the same checks the HTML form's `decode` runs; the handler maps the
+// outcome to a status code.
+
+/// The `gleam/dynamic/decode` decoder for one field of a JSON body.
+fn api_field_decoder(field_type: String) -> String {
+  case field_type {
+    "int" -> "decode.int"
+    "float" -> "float_or_int()"
+    "bool" -> "decode.bool"
+    _ -> "decode.string"
+  }
+}
+
+/// The `gleam/json` function that encodes one field of a record.
+fn api_field_encoder(field_type: String) -> String {
+  case field_type {
+    "int" -> "json.int"
+    "float" -> "json.float"
+    "bool" -> "json.bool"
+    _ -> "json.string"
+  }
+}
+
+/// A valid JSON value for a field, for generated tests.
+fn api_sample_json(field_type: String) -> String {
+  case field_type {
+    "int" -> "json.int(42)"
+    "float" -> "json.float(3.14)"
+    "bool" -> "json.bool(True)"
+    _ -> "json.string(\"test value\")"
+  }
+}
+
+/// A JSON value of the wrong type for a field, for generated tests.
+fn api_wrong_json(field_type: String) -> String {
+  case field_type {
+    "int" | "float" -> "json.string(\"not a number\")"
+    "bool" -> "json.string(\"not a bool\")"
+    _ -> "json.int(42)"
+  }
+}
+
+/// The fields the HTML form's `decode` requires: string and text.
+fn api_required_fields(
+  fields: List(#(String, String)),
+) -> List(#(String, String)) {
+  list.filter(fields, fn(f) { f.1 == "string" || f.1 == "text" })
+}
+
 fn api_params_module(
-  _app_name: String,
-  _resource_singular: String,
   type_name: String,
   fields: List(#(String, String)),
 ) -> String {
+  let params = type_name <> "Params"
+  let required = api_required_fields(fields)
+  let has_float = list.any(fields, fn(f) { f.1 == "float" })
+
+  let imports =
+    ["import gleam/dynamic.{type Dynamic}", "import gleam/dynamic/decode"]
+    |> append_if(has_float, "import gleam/int")
+    |> append_if(required != [], "import refrakt/validate")
+    |> string.join("\n")
+
   let params_field_defs =
     fields
     |> list.map(fn(f) {
@@ -688,19 +746,116 @@ fn api_params_module(
     })
     |> string.join("\n")
 
-  "/// Params type for " <> type_name <> " (API mode).
-///
-pub type " <> type_name <> "Params {
-  " <> type_name <> "Params(
+  let decoder_lines =
+    fields
+    |> list.map(fn(f) {
+      let #(name, field_type) = f
+      "  use "
+      <> name
+      <> " <- decode.optional_field(\""
+      <> name
+      <> "\", "
+      <> form_default_value(field_type)
+      <> ", "
+      <> api_field_decoder(field_type)
+      <> ")"
+    })
+    |> string.join("\n")
+
+  let constructor_args =
+    fields
+    |> list.map(fn(f) { f.0 <> ":" })
+    |> string.join(", ")
+
+  let validate_fn = case required {
+    [] -> "/// The HTML form's `decode` has no checks for these field types; add
+/// your own with `refrakt/validate`. Errors are `#(field, message)` pairs.
+pub fn validate_params(_params: " <> params <> ") -> List(#(String, String)) {
+  []
+}"
+    _ ->
+      "/// The checks the HTML form's `decode` runs: string and text fields are
+/// required. Errors are `#(field, message)` pairs.
+pub fn validate_params(params: " <> params <> ") -> List(#(String, String)) {
+  []
+" <> {
+        required
+        |> list.map(fn(f) {
+          "  |> validate.required(params."
+          <> f.0
+          <> ", \""
+          <> f.0
+          <> "\", \""
+          <> capitalize(f.0)
+          <> " is required\")"
+        })
+        |> string.join("\n")
+      } <> "
+}"
+  }
+
+  let float_or_int = case has_float {
+    True ->
+      "
+
+/// JSON has a single number type: accept `4` as well as `4.0`.
+fn float_or_int() -> decode.Decoder(Float) {
+  decode.one_of(decode.float, [decode.int |> decode.map(int.to_float)])
+}"
+    False -> ""
+  }
+
+  "//// JSON params for " <> type_name <> " (API mode).
+////
+//// `decode_json` turns the body `wisp.require_json` hands a handler into
+//// validated " <> params <> ", with the same checks the HTML form's `decode`
+//// runs.
+
+" <> imports <> "
+
+pub type " <> params <> " {
+  " <> params <> "(
 " <> params_field_defs <> "
   )
 }
+
+/// Why a JSON body could not become " <> params <> ".
+pub type JsonError {
+  /// The body is not an object whose fields have the expected types.
+  /// Handlers answer 400 Bad Request.
+  MalformedBody(errors: List(decode.DecodeError))
+  /// The body has the expected shape but fails validation.
+  /// Handlers answer 422 Unprocessable Content.
+  InvalidParams(errors: List(#(String, String)))
+}
+
+/// Decode a JSON body and validate it.
+pub fn decode_json(data: Dynamic) -> Result(" <> params <> ", JsonError) {
+  case decode.run(data, decoder()) {
+    Error(errors) -> Error(MalformedBody(errors))
+    Ok(params) ->
+      case validate_params(params) {
+        [] -> Ok(params)
+        errors -> Error(InvalidParams(errors))
+      }
+  }
+}
+
+/// The JSON shape of " <> params <> ". A missing field gets the value an
+/// empty HTML form field would (`\"\"`, `0`, `0.0`, `false`); `null` or a
+/// value of the wrong type fails decoding.
+pub fn decoder() -> decode.Decoder(" <> params <> ") {
+" <> decoder_lines <> "
+  decode.success(" <> params <> "(" <> constructor_args <> "))
+}
+
+" <> validate_fn <> float_or_int <> "
 "
 }
 
 fn api_resource_handler(
   app_name: String,
-  _resource_plural: String,
+  resource_plural: String,
   resource_singular: String,
   type_name: String,
   db: DbChoice,
@@ -710,93 +865,222 @@ fn api_resource_handler(
     Sqlite -> "ctx.db_path"
     _ -> "ctx.db"
   }
+  let repo = resource_singular <> "_repo"
+  let form = resource_singular <> "_form"
 
-  // Build JSON object fields for serialization
   let json_fields =
     fields
     |> list.map(fn(f) {
       let #(name, field_type) = f
-      let json_fn = case field_type {
-        "int" -> "json.int"
-        "float" -> "json.float"
-        "bool" -> "json.bool"
-        _ -> "json.string"
-      }
-      "      #(\"" <> name <> "\", " <> json_fn <> "(item." <> name <> ")),"
+      "    #(\""
+      <> name
+      <> "\", "
+      <> api_field_encoder(field_type)
+      <> "(item."
+      <> name
+      <> ")),"
     })
     |> string.join("\n")
 
-  let to_json =
-    "fn to_json(item: "
-    <> resource_singular
-    <> ".type_placeholder) -> json.Json {
-  json.object([
-    #(\"id\", json.int(item.id)),
-"
-    <> json_fields
-    <> "
-  ])
-}"
+  "//// JSON API for "
+  <> resource_plural
+  <> ", routed under /api/"
+  <> resource_plural
+  <> ".
+////
+//// Errors are JSON too: 404 `{\"error\": \"not found\"}`, 400 for a body
+//// whose fields have the wrong types, and 422
+//// `{\"errors\": {\"field\": \"message\"}}` when validation fails. A body
+//// that is not JSON at all is rejected by `wisp.require_json` (400), as is
+//// a content type other than application/json (415).
 
-  // Fix the type placeholder
-  let to_json = string.replace(to_json, "type_placeholder", type_name)
-
-  let extra_imports = case list.any(fields, fn(f) { f.1 == "float" }) {
-    True -> "\nimport gleam/float"
-    False -> ""
-  }
-
-  "import gleam/int" <> extra_imports <> "
+import gleam/dynamic/decode
+import gleam/http/response
+import gleam/int
 import gleam/json
-import " <> app_name <> "/context.{type Context}
-import " <> app_name <> "/data/" <> resource_singular <> "_repo
-import " <> app_name <> "/domain/" <> resource_singular <> "
+import gleam/list
+import gleam/result
+import gleam/string
+import "
+  <> app_name
+  <> "/context.{type Context}
+import "
+  <> app_name
+  <> "/data/"
+  <> repo
+  <> "
+import "
+  <> app_name
+  <> "/domain/"
+  <> resource_singular
+  <> ".{type "
+  <> type_name
+  <> "}
+import "
+  <> app_name
+  <> "/web/forms/"
+  <> form
+  <> "
 import wisp.{type Request, type Response}
 
 pub fn index(_req: Request, ctx: Context) -> Response {
-  let items = " <> resource_singular <> "_repo.list(" <> db_arg <> ")
-  let body =
-    json.array(items, to_json)
-    |> json.to_string
-  wisp.json_response(body, 200)
+  "
+  <> repo
+  <> ".list("
+  <> db_arg
+  <> ")
+  |> json.array(to_json)
+  |> json_response(200)
 }
 
-pub fn show(req: Request, ctx: Context, id: String) -> Response {
-  case int.parse(id) {
-    Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
-    Ok(id) ->
-      case " <> resource_singular <> "_repo.get(" <> db_arg <> ", id) {
-        Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
-        Ok(item) -> {
-          wisp.json_response(json.to_string(to_json(item)), 200)
-        }
-      }
+pub fn show(_req: Request, ctx: Context, id: String) -> Response {
+  case find(ctx, id) {
+    Error(_) -> not_found()
+    Ok(item) -> json_response(to_json(item), 200)
   }
 }
 
 pub fn create(req: Request, ctx: Context) -> Response {
-  use _json_body <- wisp.require_json(req)
-  // TODO: decode JSON body into " <> type_name <> "Params and create
-  wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
-}
+  use body <- wisp.require_json(req)
 
-pub fn update(req: Request, ctx: Context, id: String) -> Response {
-  use _json_body <- wisp.require_json(req)
-  // TODO: decode JSON body into " <> type_name <> "Params and update
-  wisp.json_response(\"{\\\"error\\\":\\\"not implemented\\\"}\", 501)
-}
-
-pub fn delete(req: Request, ctx: Context, id: String) -> Response {
-  case int.parse(id) {
-    Error(_) -> wisp.json_response(\"{\\\"error\\\":\\\"not found\\\"}\", 404)
-    Ok(id) -> {
-      let _ = " <> resource_singular <> "_repo.delete(" <> db_arg <> ", id)
-      wisp.json_response(\"{\\\"ok\\\":true}\", 200)
-    }
+  case "
+  <> form
+  <> ".decode_json(body) {
+    Error(error) -> invalid_body(error)
+    Ok(params) ->
+      case "
+  <> repo
+  <> ".create("
+  <> db_arg
+  <> ", params) {
+        Ok(item) ->
+          json_response(to_json(item), 201)
+          |> response.set_header(
+            \"location\",
+            \"/api/"
+  <> resource_plural
+  <> "/\" <> int.to_string(item.id),
+          )
+        Error(_) -> internal_error()
+      }
   }
 }
 
-" <> to_json <> "
+/// The body is checked before the record is looked up, so a bad body
+/// gets 400 or 422 even when the id is unknown.
+pub fn update(req: Request, ctx: Context, id: String) -> Response {
+  use body <- wisp.require_json(req)
+
+  case "
+  <> form
+  <> ".decode_json(body) {
+    Error(error) -> invalid_body(error)
+    Ok(params) ->
+      case find(ctx, id) {
+        Error(_) -> not_found()
+        Ok(item) ->
+          case "
+  <> repo
+  <> ".update("
+  <> db_arg
+  <> ", item.id, params) {
+            Ok(item) -> json_response(to_json(item), 200)
+            Error(_) -> internal_error()
+          }
+      }
+  }
+}
+
+pub fn delete(_req: Request, ctx: Context, id: String) -> Response {
+  case find(ctx, id) {
+    Error(_) -> not_found()
+    Ok(item) ->
+      case "
+  <> repo
+  <> ".delete("
+  <> db_arg
+  <> ", item.id) {
+        Ok(_) -> wisp.no_content()
+        Error(_) -> internal_error()
+      }
+  }
+}
+
+/// Look up a record by the id from the path. An id that is not a number
+/// is as unknown as one without a row.
+fn find(ctx: Context, id: String) -> Result("
+  <> type_name
+  <> ", Nil) {
+  use id <- result.try(int.parse(id))
+  "
+  <> repo
+  <> ".get("
+  <> db_arg
+  <> ", id)
+}
+
+fn to_json(item: "
+  <> type_name
+  <> ") -> json.Json {
+  json.object([
+    #(\"id\", json.int(item.id)),
+"
+  <> json_fields
+  <> "
+  ])
+}
+
+fn json_response(data: json.Json, status: Int) -> Response {
+  data
+  |> json.to_string
+  |> wisp.json_response(status)
+}
+
+/// 400 with what did not decode, or 422 with a message per invalid field.
+fn invalid_body(error: "
+  <> form
+  <> ".JsonError) -> Response {
+  case error {
+    "
+  <> form
+  <> ".MalformedBody(errors) ->
+      json.object([
+        #(\"error\", json.string(\"invalid request body\")),
+        #(\"details\", json.array(errors, decode_error_to_json)),
+      ])
+      |> json_response(400)
+    "
+  <> form
+  <> ".InvalidParams(errors) ->
+      json.object([
+        #(
+          \"errors\",
+          json.object(
+            list.map(errors, fn(error) { #(error.0, json.string(error.1)) }),
+          ),
+        ),
+      ])
+      |> json_response(422)
+  }
+}
+
+fn decode_error_to_json(error: decode.DecodeError) -> json.Json {
+  json.object([
+    #(\"path\", json.string(string.join(error.path, \".\"))),
+    #(\"expected\", json.string(error.expected)),
+    #(\"found\", json.string(error.found)),
+  ])
+}
+
+fn not_found() -> Response {
+  json.object([#(\"error\", json.string(\"not found\"))])
+  |> json_response(404)
+}
+
+fn internal_error() -> Response {
+  json.object([#(\"error\", json.string(\"internal server error\"))])
+  |> json_response(500)
+}
 "
 }
 
@@ -1654,14 +1938,160 @@ fn resource_migration(
   }
 }
 
-fn api_resource_test(_app_name: String, _resource_singular: String) -> String {
-  "import gleeunit/should
+fn api_resource_test(
+  app_name: String,
+  resource_plural: String,
+  resource_singular: String,
+  db: DbChoice,
+  fields: List(#(String, String)),
+) -> String {
+  let handler = resource_singular <> "_handler"
+  let form = resource_singular <> "_form"
+  let path = "/api/" <> resource_plural
 
-pub fn placeholder_test() {
-  // API handler tests require a running database.
-  // Test your domain logic and JSON encoding instead.
-  1 + 1
-  |> should.equal(2)
+  let db_imports = case db {
+    Postgres -> "\nimport gleam/erlang/process\nimport pog"
+    _ -> ""
+  }
+
+  let test_db = case db {
+    Postgres ->
+      "db: pog.named_connection(process.new_name(prefix: \""
+      <> app_name
+      <> "_test_db\"))"
+    _ -> "db_path: \":memory:\""
+  }
+
+  let valid_fields =
+    fields
+    |> list.map(fn(f) {
+      "    #(\"" <> f.0 <> "\", " <> api_sample_json(f.1) <> "),"
+    })
+    |> string.join("\n")
+
+  let validation_tests = case api_required_fields(fields) {
+    [] -> ""
+    [#(name, _), ..] -> "
+
+pub fn decode_json_rejects_a_missing_" <> name <> "_test() {
+  let assert Ok(data) = json.parse(\"{}\", decode.dynamic)
+
+  " <> form <> ".decode_json(data)
+  |> should.be_error
+}
+
+pub fn create_with_invalid_body_returns_422_test() {
+  let response =
+    testing.json_request(http.Post, \"" <> path <> "\", \"{}\")
+    |> " <> handler <> ".create(test_context())
+
+  response.status |> should.equal(422)
+  simulate.read_body(response)
+  |> json.parse(decode.at([\"errors\", \"" <> name <> "\"], decode.string))
+  |> should.equal(Ok(\"" <> capitalize(name) <> " is required\"))
+}
+
+pub fn update_with_invalid_body_returns_422_test() {
+  let response =
+    testing.json_request(http.Put, \"" <> path <> "/1\", \"{}\")
+    |> " <> handler <> ".update(test_context(), \"1\")
+
+  response.status |> should.equal(422)
+}"
+  }
+
+  let wrong_type_test = case fields {
+    [] -> ""
+    [#(name, field_type), ..] -> "
+
+pub fn create_with_wrong_field_type_returns_400_test() {
+  let body =
+    json.object([#(\"" <> name <> "\", " <> api_wrong_json(field_type) <> ")])
+    |> json.to_string
+  let response =
+    testing.json_request(http.Post, \"" <> path <> "\", body)
+    |> " <> handler <> ".create(test_context())
+
+  response.status |> should.equal(400)
+}"
+  }
+
+  "//// Tests for the " <> resource_plural <> " JSON API.
+////
+//// These cover what a handler answers before it reaches the database:
+//// malformed and invalid bodies, and ids that are not numbers. Creating,
+//// updating and deleting rows needs a migrated database; try those
+//// against the running app (`refrakt migrate`, then curl " <> path <> ").
+
+import gleam/dynamic/decode
+import gleam/http
+import gleam/json" <> db_imports <> "
+import gleeunit/should
+import " <> app_name <> "/config
+import " <> app_name <> "/context.{type Context, Context}
+import " <> app_name <> "/web/forms/" <> form <> "
+import " <> app_name <> "/web/" <> handler <> "
+import refrakt/testing
+import wisp/simulate
+
+/// A context whose database these tests never reach.
+fn test_context() -> Context {
+  let assert Ok(cfg) = config.load()
+  Context(config: cfg, " <> test_db <> ")
+}
+
+fn valid_body() -> String {
+  json.object([
+" <> valid_fields <> "
+  ])
+  |> json.to_string
+}
+
+pub fn decode_json_accepts_a_valid_body_test() {
+  let assert Ok(data) = json.parse(valid_body(), decode.dynamic)
+
+  " <> form <> ".decode_json(data)
+  |> should.be_ok
+}" <> validation_tests <> wrong_type_test <> "
+
+pub fn create_with_malformed_json_returns_400_test() {
+  let response =
+    testing.json_request(http.Post, \"" <> path <> "\", \"{not json\")
+    |> " <> handler <> ".create(test_context())
+
+  response.status |> should.equal(400)
+}
+
+pub fn update_with_malformed_json_returns_400_test() {
+  let response =
+    testing.json_request(http.Put, \"" <> path <> "/1\", \"{not json\")
+    |> " <> handler <> ".update(test_context(), \"1\")
+
+  response.status |> should.equal(400)
+}
+
+pub fn update_unknown_id_returns_404_test() {
+  let response =
+    testing.json_request(http.Put, \"" <> path <> "/unknown\", valid_body())
+    |> " <> handler <> ".update(test_context(), \"unknown\")
+
+  response.status |> should.equal(404)
+}
+
+pub fn show_unknown_id_returns_404_test() {
+  let response =
+    simulate.request(http.Get, \"" <> path <> "/unknown\")
+    |> " <> handler <> ".show(test_context(), \"unknown\")
+
+  response.status |> should.equal(404)
+}
+
+pub fn delete_unknown_id_returns_404_test() {
+  let response =
+    simulate.request(http.Delete, \"" <> path <> "/unknown\")
+    |> " <> handler <> ".delete(test_context(), \"unknown\")
+
+  response.status |> should.equal(404)
 }
 "
 }

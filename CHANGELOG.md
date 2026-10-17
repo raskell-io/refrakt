@@ -8,9 +8,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Upgrading
 
-Generated code belongs to your app, so existing projects need these edits by hand.
-Compare with a freshly generated app (`refrakt new` plus `gen auth`):
-
+- **Migrations:** delete `src/<app>/migrate.gleam` and run
+  `gleam run -m refrakt_cli -- migrate` to regenerate it. The new module
+  calls `migrate.run` instead of `migrate.run_from_directory`, splits
+  Postgres files into statements and wraps each migration in a
+  transaction. `refrakt migrate` prints a warning while the old module
+  is still in place. If you changed your `migrate.gleam`, compare it
+  with the regenerated one and carry your changes over.
 - **Dependencies:** bump `refrakt` to `>= 0.5.0 and < 1.0.0`.
 - **Router (CSRF):** add `import refrakt/csrf` and `use req <- csrf.protect(req)`
   to `middleware`, after `rescue_crashes`. Make sure GET handlers have no side
@@ -31,6 +35,50 @@ Compare with a freshly generated app (`refrakt new` plus `gen auth`):
   `dummy_hash` and `authenticate` into `domain/auth.gleam` and use
   `authenticate` in the login handler. Everyone is logged out once, because
   the cookie changes from `_user_id` to `_session`.
+
+### Added
+
+- `testing.json_request(method, path, body)` builds a `wisp.Request`
+  with a JSON body and `content-type: application/json`, ready to pass
+  to a handler in tests.
+- `gen resource ... --api` generates handler tests: malformed and
+  invalid bodies (400, 422) and unknown ids (404). They need no
+  database. The generated-project CI now builds two `--api` resources
+  and exercises the JSON API of one end to end.
+
+### Changed
+
+- `config.load()` in generated apps returns `Result(Config, ConfigError)`;
+  `config.describe_error` explains a failure.
+- `refrakt new` generates `test/<app>/router_test.gleam`, and `gen resource`
+  tests now go through the router to check CSRF rejection and form
+  re-rendering. `gen auth` also generates `web/session.gleam` and
+  `test/<app>/web/session_test.gleam`.
+- Generated apps require `refrakt >= 0.5.0` for `refrakt/csrf`.
+
+### Fixed
+
+- Postgres migrations with more than one statement failed, because each
+  file ran as a single `pog` query. The generated migrate module now
+  splits files with the new `migrate.split_statements`, which leaves
+  semicolons alone inside strings, quoted identifiers, comments,
+  dollar-quoted bodies (`$$ ... $$`, `$tag$ ... $tag$`) and
+  `BEGIN ATOMIC ... END`. Each migration and its `_migrations` row now
+  run in one transaction on Postgres and SQLite, so a failing migration
+  is rolled back whole and not recorded, and the error names the file,
+  the database error and, on Postgres, the failing statement. The new
+  `migrate.run` takes a `query` and a `transaction` callback;
+  `migrate.run_from_directory` is deprecated (#17).
+- `gen resource ... --api` generated `create` and `update` handlers that
+  answered `501 {"error":"not implemented"}`. The params module now
+  decodes the JSON body with `gleam/dynamic/decode` and validates it
+  with the same checks as the HTML form; `create` answers 201 with the
+  record and a `Location` header, `update` 200, a failed validation 422
+  `{"errors": {"field": "message"}}`, and a body with wrong field types
+  400. `delete` answers 204 (was 200 `{"ok":true}`), and `update` and
+  `delete` answer 404 for an unknown id, like `show` (#18).
+- `gen resource ... --api` with a `float` field imported `gleam/float`
+  without using it, a warning that failed `--warnings-as-errors` builds.
 
 ### Security
 
@@ -55,16 +103,6 @@ Compare with a freshly generated app (`refrakt new` plus `gen auth`):
 - Generated apps log a warning at startup when `APP_ENV` is unset, since that
   means development mode with detailed error pages (#20). `refrakt dev`
   sets `APP_ENV=dev` explicitly.
-
-### Changed
-
-- `config.load()` in generated apps returns `Result(Config, ConfigError)`;
-  `config.describe_error` explains a failure.
-- `refrakt new` generates `test/<app>/router_test.gleam`, and `gen resource`
-  tests now go through the router to check CSRF rejection and form
-  re-rendering. `gen auth` also generates `web/session.gleam` and
-  `test/<app>/web/session_test.gleam`.
-- Generated apps require `refrakt >= 0.5.0` for `refrakt/csrf`.
 
 ## [0.4.1] - 2026-10-17
 

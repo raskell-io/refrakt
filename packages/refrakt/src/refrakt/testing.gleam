@@ -18,6 +18,8 @@
 import gleam/http
 import gleam/http/request
 import gleam/http/response.{type Response}
+import wisp
+import wisp/simulate
 
 /// Create a GET request for testing.
 pub fn get(path: String) -> request.Request(String) {
@@ -102,6 +104,29 @@ pub fn with_body(
   body: String,
 ) -> request.Request(String) {
   request.set_body(req, body)
+}
+
+/// Create a request with a JSON body, ready to pass straight to a handler.
+///
+/// Unlike the builders above, this returns a `wisp.Request`, the type
+/// handlers take. The body is a string so tests can send malformed JSON
+/// too; build valid bodies with `gleam/json`. The `content-type` header
+/// is `application/json`, as `wisp.require_json` expects.
+///
+/// ```gleam
+/// let body = json.object([#("title", json.string("Hello"))])
+///
+/// testing.json_request(http.Post, "/api/posts", json.to_string(body))
+/// |> post_handler.create(ctx)
+/// ```
+pub fn json_request(
+  method: http.Method,
+  path: String,
+  body: String,
+) -> wisp.Request {
+  simulate.request(method, path)
+  |> simulate.string_body(body)
+  |> simulate.header("content-type", "application/json")
 }
 
 /// Check that a response has a specific status code.
