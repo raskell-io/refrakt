@@ -74,13 +74,13 @@ jobs:
         working-directory: packages/refrakt
         env:
           HEXPM_API_KEY: ${{ secrets.HEXPM_API_KEY }}
-        run: gleam publish --yes < /dev/null
+        run: ../../.github/scripts/hex-publish.sh
 
       - name: Publish refrakt_cli
         working-directory: packages/refrakt_cli
         env:
           HEXPM_API_KEY: ${{ secrets.HEXPM_API_KEY }}
-        run: gleam publish --yes < /dev/null
+        run: ../../.github/scripts/hex-publish.sh
 
       - name: Create GitHub release
         env:
@@ -93,7 +93,13 @@ jobs:
             found && /^## \[/ { exit }
             found { print }
           ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
