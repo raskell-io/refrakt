@@ -172,34 +172,104 @@ CREATE TABLE tasks (
 
 ### Running migrations
 
-PostgreSQL:
+```bash
+refrakt migrate
+```
+
+The first run generates `src/<app>/migrate.gleam`, which connects to
+the database and applies every file not yet listed in the `_migrations`
+table, in number order.
+
+A migration file can hold as many statements as you like:
+
+```sql
+CREATE TABLE comments (
+  id SERIAL PRIMARY KEY,
+  post_id INTEGER NOT NULL REFERENCES posts (id),
+  body TEXT NOT NULL
+);
+CREATE INDEX comments_post_id_index ON comments (post_id);
+```
+
+**Each migration runs in one transaction**, together with the
+`_migrations` row that records it. If any statement fails, the whole
+file is rolled back, nothing is recorded, and `refrakt migrate` stops
+and prints the file name and the database error:
+
+```
+  003_add_comments.sql ...
+Error: Migration 003_add_comments.sql failed and was rolled back: relation "postz" does not exist (undefined_table, SQLSTATE 42P01)
+  in statement: CREATE TABLE comments (...)
+```
+
+Fix the file and run `refrakt migrate` again. Migrations that already
+succeeded stay applied. Both Postgres and SQLite roll back DDL
+(`CREATE TABLE`, `CREATE INDEX`, ...), so a failed migration leaves no
+half-created tables behind.
+
+Because of the transaction, a migration file must not contain its own
+`BEGIN`/`COMMIT`, and statements that cannot run inside a transaction
+do not work in a migration: on Postgres `CREATE INDEX CONCURRENTLY`,
+`CREATE DATABASE` and `VACUUM`; on SQLite `VACUUM` and
+`PRAGMA foreign_keys` (which is ignored inside a transaction).
+
+**Postgres** runs one statement per query, so the generated module
+splits each file with `migrate.split_statements`. It splits on `;`
+outside of string literals (`'...'`, `E'...'`), quoted identifiers
+(`"..."`), comments (`--`, `/* */`), dollar-quoted bodies (`$$ ... $$`,
+`$tag$ ... $tag$`) and `BEGIN ATOMIC ... END` function bodies, so
+functions, triggers and `DO` blocks work as written:
+
+```sql
+CREATE FUNCTION touch_updated_at() RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER posts_touch BEFORE UPDATE ON posts
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+```
+
+**SQLite** runs each file as is with `sqlight.exec`, which handles
+several statements (including `CREATE TRIGGER ... BEGIN ... END`)
+itself, between `BEGIN` and `COMMIT`.
+
+You can also apply a file by hand, outside the runner (it is then not
+recorded in `_migrations`):
 
 ```bash
 psql my_app_dev < src/my_app/data/migrations/001_create_posts.sql
-```
-
-SQLite:
-
-```bash
 sqlite3 my_app.db < src/my_app/data/migrations/001_create_tasks.sql
 ```
 
 ### Programmatic migration runner
 
-The `refrakt/migrate` module can run migrations from your app code:
+The generated `migrate.gleam` calls `migrate.run` with two callbacks,
+so the library stays independent of the database driver:
 
 ```gleam
 import refrakt/migrate
 
-let count = migrate.run_from_directory(
-  db_execute,      // fn(String) -> Result(Nil, String)
-  db_query_strings, // fn(String) -> Result(List(String), String)
+let result = migrate.run(
   "src/my_app/data/migrations",
+  // Run a SELECT, return the first column of each row
+  query: query_strings,     // fn(String) -> Result(List(String), String)
+  // Run SQL scripts in order in one transaction; roll back on error
+  transaction: transaction, // fn(List(String)) -> Result(Nil, String)
 )
+// -> Ok(number_of_migrations_applied) or Error(message)
 ```
 
 The runner tracks applied migrations in a `_migrations` table and
-only runs pending ones.
+only runs pending ones. For each pending file it calls `transaction`
+with the file's SQL and the `INSERT` into `_migrations`, so both commit
+or roll back together. Look at the generated module for the Postgres
+(`pog.transaction`) and SQLite (`BEGIN`/`COMMIT`/`ROLLBACK`) versions.
+
+`migrate.run_from_directory`, used by modules generated before 0.5, is
+deprecated: it runs each file as a single query without a transaction.
 
 ## Adding a database later
 

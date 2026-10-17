@@ -6,6 +6,30 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Migrations:** delete `src/<app>/migrate.gleam` and run
+  `gleam run -m refrakt_cli -- migrate` to regenerate it. The new module
+  calls `migrate.run` instead of `migrate.run_from_directory`, splits
+  Postgres files into statements and wraps each migration in a
+  transaction. `refrakt migrate` prints a warning while the old module
+  is still in place. If you changed your `migrate.gleam`, compare it
+  with the regenerated one and carry your changes over.
+
+### Fixed
+
+- Postgres migrations with more than one statement failed, because each
+  file ran as a single `pog` query. The generated migrate module now
+  splits files with the new `migrate.split_statements`, which leaves
+  semicolons alone inside strings, quoted identifiers, comments,
+  dollar-quoted bodies (`$$ ... $$`, `$tag$ ... $tag$`) and
+  `BEGIN ATOMIC ... END`. Each migration and its `_migrations` row now
+  run in one transaction on Postgres and SQLite, so a failing migration
+  is rolled back whole and not recorded, and the error names the file,
+  the database error and, on Postgres, the failing statement. The new
+  `migrate.run` takes a `query` and a `transaction` callback;
+  `migrate.run_from_directory` is deprecated (#17).
+
 ## [0.4.1] - 2026-10-17
 
 The first release on Hex since 0.2.0. Versions 0.3.0 and 0.4.0 were
