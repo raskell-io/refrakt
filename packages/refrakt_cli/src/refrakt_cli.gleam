@@ -9,6 +9,7 @@ import gleam/string
 import refrakt_cli/assets
 import refrakt_cli/build
 import refrakt_cli/dev
+import refrakt_cli/diff
 import refrakt_cli/gen
 import refrakt_cli/migrate_cmd
 import refrakt_cli/new
@@ -25,6 +26,7 @@ pub fn main() {
     ["gen", "island", name, ..] -> gen.island(name)
     ["gen", "live", name, ..] -> gen.live(name)
     ["routes", ..] -> routes.run()
+    ["diff", ..args] -> diff.main(args)
     ["migrate", ..] -> migrate_cmd.run()
     ["build", ..] -> build.run()
     ["assets", "setup", ..] -> assets.setup()
@@ -67,6 +69,8 @@ fn print_help() {
       "  gen live <name>                   Generate a Lustre server component",
       "",
       "  routes                            Print the route table",
+      "  diff [path...]                    Diff the app against what this CLI generates",
+      "    --stat                          Only list the changed files",
       "  migrate                           Run pending migrations",
       "  seed                              Run database seeds",
       "  build                             Compile Lustre islands to JS",
