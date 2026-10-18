@@ -127,6 +127,8 @@ packages/
       gen.gleam                ← gen resource, page, auth, island, live, migration
       templates.gleam          ← file content templates
       routes.gleam             ← refrakt_cli routes
+      diff.gleam               ← refrakt_cli diff (replays generators)
+      manifest.gleam           ← .refrakt/generated.toml
       build.gleam              ← refrakt_cli build (island JS)
       dev.gleam                ← refrakt_cli dev (watcher choice, debounce,
                                  change detection; process work in
@@ -160,11 +162,18 @@ the CLI at runtime: it is a dev-dependency only.
 2. Generator functions in `gen.gleam` write files via `simplifile`
 3. Router patching finds `_, _ ->` catch-all and inserts routes before it
 4. `gleam format` runs on all generated `.gleam` files automatically
+5. The generator records its arguments with `manifest.record` in the
+   app's `.refrakt/generated.toml`, which `refrakt diff` replays.
+   Generators must be deterministic: the same arguments on the same app
+   must write the same files, or `refrakt diff` reports false differences
+   (the generated-app check fails on that)
 
 ## Adding a new generator
 
 1. Add the template function(s) in `gen.gleam` or `templates.gleam`
-2. Add the public function in `gen.gleam`
+2. Add the public function in `gen.gleam`; when it writes templates,
+   call `manifest.record([...])` after it succeeds and add the matching
+   case to `replay` in `diff.gleam`
 3. Add the command match and help line in `refrakt_cli.gleam`
 4. Add an integration test in `packages/refrakt_cli/test/refrakt_cli/gen_test.gleam`
 5. If it should be covered end to end, call it from
@@ -193,6 +202,12 @@ the CLI at runtime: it is a dev-dependency only.
 See the release process in [`.claude/rules/workflow.md`](.claude/rules/workflow.md#release-process):
 bump both packages, update the changelog, push a `vX.Y.Z` tag, and the
 release workflow publishes both packages and creates the GitHub release.
+
+Generated code belongs to the app, so a release cannot update existing
+apps. If a pull request changes a template, add an entry to the
+`### Upgrading` list under `## [Unreleased]` in `CHANGELOG.md` with the
+hand edit an existing app needs. Users find the changes with
+`refrakt diff` and apply them with those notes.
 
 ## Reporting issues
 

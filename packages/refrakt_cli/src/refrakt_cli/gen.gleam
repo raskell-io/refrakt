@@ -8,6 +8,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import refrakt_cli/format
+import refrakt_cli/manifest
 import refrakt_cli/project
 import refrakt_cli/templates
 import refrakt_cli/types.{
@@ -59,6 +60,7 @@ pub fn placeholder_test() {
   let _ = patch_router_page(app, name)
   let router_path = "src/" <> app <> "/router.gleam"
   format.format_files([handler_path, test_path, router_path])
+  manifest.record(["page", name])
 
   io.println("")
   io.println("Created:")
@@ -104,8 +106,10 @@ fn resource_with_db(name: String, raw_args: List(String), db: DbChoice) {
       io.println("Error: " <> message)
       io.println("Nothing was generated.")
     }
-    Ok(#(fields, api_mode, relation)) ->
+    Ok(#(fields, api_mode, relation)) -> {
       generate_resource(app, name, fields, api_mode, relation, db)
+      manifest.record(["resource", name, ..raw_args])
+    }
   }
 }
 
@@ -635,6 +639,7 @@ fn auth_with_db(db: DbChoice) {
       }
     })
   format.format_files([router_path, ..list.append(gleam_paths, test_db_paths)])
+  manifest.record(["auth"])
 
   io.println("")
   io.println("Created:")
@@ -671,6 +676,7 @@ pub fn live(name: String) {
   let _ = patch_router_live(app, name)
   let router_path = "src/" <> app <> "/router.gleam"
   format.format_files([component_path, socket_path, handler_path, router_path])
+  manifest.record(["live", name])
 
   io.println("")
   io.println("Created:")
@@ -893,6 +899,7 @@ pub fn island(name: String) {
   let assert Ok(_) = simplifile.write(island_path, island_module(name))
   let assert Ok(_) = simplifile.write(embed_path, island_embed(app, name))
   format.format_files([island_path, embed_path])
+  manifest.record(["island", name])
 
   io.println("")
   io.println("Created:")
@@ -5043,7 +5050,7 @@ fn capitalize(s: String) -> String {
   }
 }
 
-fn singularize(s: String) -> String {
+pub fn singularize(s: String) -> String {
   // Simple singularization: drop trailing 's'
   // Handles: posts -> post, users -> user, categories -> categorie (good enough for MVP)
   case string.ends_with(s, "ies") {

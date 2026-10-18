@@ -9,6 +9,7 @@ the generators depend on it.
 ```
 my_app/
   gleam.toml                            ← package config
+  .refrakt/generated.toml               ← generators run, for `refrakt diff`
   src/
     my_app.gleam                        ← entry point, starts the server
 

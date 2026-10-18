@@ -148,6 +148,7 @@ Run inside a generated app as `gleam run -m refrakt_cli -- <command>`
 | `refrakt assets setup` / `assets build` | Set up and build Tailwind CSS assets |
 | `refrakt dev` | Dev server: rebuilds on changes, keeps the last good build on a compile error, reloads open pages |
 | `refrakt routes` | Print the route table |
+| `refrakt diff` | Diff the app against what the current templates generate |
 
 <br>
 
