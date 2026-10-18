@@ -4,7 +4,37 @@ All notable changes to Refrakt are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
+Generated code belongs to your app, so a new release never changes an
+existing app. Every release with template changes has an **Upgrading**
+section listing the hand edits. To upgrade an app: bump `refrakt` and
+`refrakt_cli` in `gleam.toml`, run `refrakt diff` to see what the new
+templates generate differently, and apply what you want
+(see [CLI](docs/cli.md#upgrading-an-app)).
+
 ## [Unreleased]
+
+### Added
+
+- `refrakt diff [path...]` shows how an app differs from what the
+  installed refrakt_cli generates for it, as a unified diff per file,
+  framework files (router, config, layouts, middleware, session, test
+  support) first, plus a summary of files missing from the app and of
+  the app's own files. `--stat` lists the changed files only. It exits
+  with 1 when generated files differ, so CI can use it, and never writes
+  into the app (#27).
+- `refrakt new` writes `.refrakt/generated.toml`, and `gen page`,
+  `gen resource`, `gen auth`, `gen island` and `gen live` record their
+  arguments in it, so `refrakt diff` can replay them. For apps created
+  before this release `refrakt diff` infers the generators from the
+  app's files; `refrakt diff --print-manifest` prints the inferred
+  manifest to save and correct (#27).
+
+### Upgrading
+
+- **Manifest (optional):** to make `refrakt diff` exact for an existing
+  app, run `mkdir -p .refrakt && refrakt diff --print-manifest >
+  .refrakt/generated.toml`, check the inferred generators, and commit
+  the file. Without it, generators keep working and record nothing.
 
 ## [0.6.0] - 2026-10-17
 
