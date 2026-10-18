@@ -44,7 +44,9 @@ app.
 | `--no-db` | No database (default) |
 
 **Creates:** Full project with config, router, home handler, layout,
-CSS, tests, and optionally a database repo.
+CSS, tests, and optionally a database repo, plus
+`.refrakt/generated.toml`, the record of generators that
+[`refrakt diff`](#refrakt-diff-path) replays.
 
 ---
 
@@ -314,6 +316,122 @@ GET     /posts/new          post_handler.new
 POST    /posts              post_handler.create
 GET     /posts/:id          post_handler.show
 ```
+
+---
+
+### `refrakt diff [path...]`
+
+Show how the app differs from what the installed `refrakt_cli` would
+generate for it. Generated code belongs to your app, so upgrading
+`refrakt_cli` never changes it; `refrakt diff` shows which template
+improvements you are missing.
+
+```bash
+refrakt diff                          # every generated file
+refrakt diff src/my_app/router.gleam  # one file
+refrakt diff src/my_app/web           # a directory (several paths are fine)
+refrakt diff --stat                   # only list the changed files
+```
+
+It renders the app again into a temporary directory: `refrakt new` with
+the app's name and database, then every generator the app ran, in order.
+It then prints a unified diff of each generated file against the app's
+copy (with `diff -u` when available). Lines with `-` are the app's, lines
+with `+` are what the current templates generate. It never writes into
+the app.
+
+Framework files come first (router, config, context, entry point,
+layouts, middleware, session, test support), then everything else by
+path. A summary follows:
+
+```
+--- a/src/my_app/router.gleam
++++ b/src/my_app/router.gleam
+@@ -49,7 +49,6 @@
+     ["events", id], http.Delete -> event_handler.delete(req, ctx, id)
+-    ["about-us"], http.Get -> about_handler.index(req, ctx)
+     ["about"], http.Get -> about_handler.index(req, ctx)
+...
+
+Differ from the templates (2):
+  src/my_app/router.gleam
+  src/my_app/web/post_views.gleam
+Only in the app (not generated; not compared) (1):
+  src/my_app/data/migrations/006_create_tags.sql
+
+Lines with + are what this refrakt_cli generates; lines with - are the app's.
+```
+
+- **Differ from the templates:** generated files you (or an older
+  refrakt_cli) changed.
+- **Only in the templates:** files the current generators write that the
+  app lacks, shown as new files in the diff, such as a module a newer
+  version added.
+- **Only in the app:** your own files under `src/`, `test/` and `priv/`
+  (hand-written modules, `gen migration` files), and a `Dockerfile`,
+  `.dockerignore`, `fly.toml` or `bin/migrate` that `gen deploy` did not
+  write. Listed for reference, never compared.
+
+The files of `gen deploy` (`Dockerfile`, `.dockerignore`, `fly.toml`,
+`bin/migrate`) are compared like the others, so a newer Dockerfile
+template shows up as a difference; `refrakt diff src test priv` leaves
+them out.
+
+Migration numbers depend on how many migrations existed when a generator
+ran, so a rendered `003_create_posts.sql` is compared with the app's
+`*_create_posts.sql`.
+
+**Exit status:** `0` when no generated file differs or is missing, `1`
+when some do, `2` on a usage error (for example outside an app). That
+makes it usable in CI, for instance to check that an app still matches
+its templates exactly, or limited to the files you never customise:
+`refrakt diff src/my_app/web/layouts`.
+
+**Which generators ran:** `refrakt new` writes `.refrakt/generated.toml`
+and every `gen page`, `gen resource`, `gen auth`, `gen island`,
+`gen live` and `gen deploy` appends its arguments (running the same command twice records
+it once). Commit the file. If you delete a resource or page, delete its
+entry; if you renamed one, adjust it.
+
+```toml
+[new]
+name = "my_app"
+db = "sqlite"
+
+[[gen]]
+args = ["resource", "posts", "title:string", "body:text", "published:bool"]
+
+[[gen]]
+args = ["auth"]
+```
+
+Apps created before refrakt_cli 0.7 have no manifest. `refrakt diff`
+then infers the generators from the app's files and prints what it
+inferred: resources from `data/migrations/*_create_<plural>.sql` with a
+matching handler and domain type (fields, `optional(...)` and
+`--belongs-to` from the CREATE TABLE, Bool vs Int from the domain type,
+text from the form's textarea, `--api` when there are no views), auth
+from `auth_handler.gleam`, pages, live components and islands from their
+modules, ordered like their routes. On SQLite a `date` or `datetime`
+field of an `--api` resource cannot be told from a string. To pin it
+down, save the inferred manifest and correct it:
+
+```bash
+mkdir -p .refrakt
+refrakt diff --print-manifest > .refrakt/generated.toml
+```
+
+#### Upgrading an app
+
+1. Bump `refrakt` and `refrakt_cli` in `gleam.toml` (see the
+   **Upgrading** notes of each release in the
+   [changelog](../CHANGELOG.md)) and run `gleam deps download`.
+2. Run `refrakt diff` (or `refrakt diff --stat` first) to see what the
+   new templates generate differently.
+3. Apply the changes you want by hand. To take a file's changes whole,
+   `refrakt diff src/my_app/router.gleam | git apply` (or `patch -p1`)
+   applies that diff; it also undoes your own edits to that file, so
+   review it first.
 
 ---
 

@@ -4,6 +4,13 @@ All notable changes to Refrakt are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
+Generated code belongs to your app, so a new release never changes an
+existing app. Every release with template changes has an **Upgrading**
+section listing the hand edits. To upgrade an app: bump `refrakt` and
+`refrakt_cli` in `gleam.toml`, run `refrakt diff` to see what the new
+templates generate differently, and apply what you want
+(see [CLI](docs/cli.md#upgrading-an-app)).
+
 ## [Unreleased]
 
 ### Added
@@ -22,15 +29,25 @@ uses [Semantic Versioning](https://semver.org/).
   to the router when there is no health route. Never overwrites a file.
 - New apps read `HOST` (default `localhost`) and listen on it through
   `mist.bind(cfg.host)`, and SQLite apps read `DATABASE_PATH` (default
-  `<app>.db`). For an existing app, add the `host` config field and
-  `|> mist.bind(cfg.host)` after `|> mist.new`, and read `DATABASE_PATH`
-  in `repo.database_path`; `gen deploy` warns when they are missing.
+  `<app>.db`).
+- `refrakt diff [path...]` shows how an app differs from what the
+  installed refrakt_cli generates for it, as a unified diff per file,
+  framework files (router, config, layouts, middleware, session, test
+  support) first, plus a summary of files missing from the app and of
+  the app's own files. `--stat` lists the changed files only. It exits
+  with 1 when generated files differ, so CI can use it, and never writes
+  into the app (#27).
+- `refrakt new` writes `.refrakt/generated.toml`, and `gen page`,
+  `gen resource`, `gen auth`, `gen island` and `gen live` record their
+  arguments in it, so `refrakt diff` can replay them. For apps created
+  before this release `refrakt diff` infers the generators from the
+  app's files; `refrakt diff --print-manifest` prints the inferred
+  manifest to save and correct (#27).
 
 ### Changed
 
 - The generated `src/<app>/migrate.gleam` exits with status 1 when a
-  migration fails, so a deploy that runs it stops. Delete an existing
-  copy and run `refrakt migrate` (or `gen deploy`) to regenerate it.
+  migration fails, so a deploy that runs it stops.
 
 ### Fixed
 
@@ -40,9 +57,32 @@ uses [Semantic Versioning](https://semver.org/).
   Postgres. Parents are now inserted through generated fixture modules,
   `test/<app>/support/<parent>_fixture.gleam`, whose `create(ctx)`
   inserts the parent's own parent first, so a chain such as blogs →
-  posts → comments gets valid rows at every level. Existing child tests
-  keep their inline `create_<parent>` helper; regenerate them (or call
-  `<parent>_fixture.create(ctx).id`) to use the fixtures.
+  posts → comments gets valid rows at every level.
+
+### Upgrading
+
+- **Manifest (optional):** to make `refrakt diff` exact for an existing
+  app, run `mkdir -p .refrakt && refrakt diff --print-manifest >
+  .refrakt/generated.toml`, check the inferred generators, and commit
+  the file. Without it, generators keep working and record nothing.
+- **HOST (before `gen deploy`):** mist listens on `localhost` unless
+  told otherwise, which nothing outside a container reaches. In
+  `config.gleam` add a `host: String` field, set from
+  `envoy.get("HOST") |> result.unwrap("localhost")` in `load`; in
+  `src/<app>.gleam` add `|> mist.bind(cfg.host)` after `|> mist.new`.
+  `gen deploy` warns until you do.
+- **DATABASE_PATH (SQLite, before `gen deploy`):** in `data/repo.gleam`,
+  return `envoy.get("DATABASE_PATH") |> result.unwrap("<app>.db")`
+  outside of tests (add `import envoy` and `import gleam/result`), so
+  the image's database lands on the `/data` volume.
+- **migrate module:** to make a failing migration exit with status 1,
+  delete `src/<app>/migrate.gleam` and run `refrakt migrate` (or
+  `gen deploy`) to regenerate it.
+- **Fixtures (optional):** child tests generated before this release
+  keep their inline `create_<parent>` helper, which fails on Postgres
+  for a nested `--belongs-to`. Regenerate the child, or replace the
+  helper with `<parent>_fixture.create(ctx).id` after generating a
+  sibling child (which writes the fixture).
 
 ## [0.6.0] - 2026-10-17
 

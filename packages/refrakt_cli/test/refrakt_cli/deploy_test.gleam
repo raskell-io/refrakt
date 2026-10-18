@@ -4,7 +4,9 @@ import gleam/list
 import gleam/string
 import gleeunit/should
 import refrakt_cli/deploy
+import refrakt_cli/diff
 import refrakt_cli/gen
+import refrakt_cli/manifest
 import refrakt_cli/new
 import simplifile
 
@@ -183,6 +185,38 @@ pub fn deploy_rejects_unknown_options_test() {
   in_project("deploy_flag", [], fn(_app) {
     deploy.run(["--heroku"])
     simplifile.is_file("Dockerfile") |> should.equal(Ok(False))
+  })
+}
+
+// =============================================================================
+// refrakt diff
+// =============================================================================
+
+pub fn deploy_is_recorded_and_diffs_clean_test() {
+  in_project("deploy_diff", ["--db", "postgres"], fn(_app) {
+    gen.resource("posts", ["title:string"])
+    deploy.run([])
+    deploy.run(["--fly"])
+    deploy.run(["--heroku"])
+
+    let assert Ok(manifest) = manifest.read(".")
+    manifest.gens
+    |> should.equal([
+      ["resource", "posts", "title:string"],
+      ["deploy"],
+      ["deploy", "--fly"],
+    ])
+
+    let assert Ok(report) = diff.check([])
+    report.changed |> should.equal([])
+    report.missing |> should.equal([])
+    report.problems |> should.equal([])
+    report.only_in_app |> should.equal([])
+
+    // An edited Dockerfile is a difference
+    let assert Ok(_) = simplifile.append("Dockerfile", "# mine\n")
+    let assert Ok(report) = diff.check([])
+    report.changed |> should.equal(["Dockerfile"])
   })
 }
 

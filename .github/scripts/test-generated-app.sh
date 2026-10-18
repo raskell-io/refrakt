@@ -9,7 +9,8 @@
 #      with optional(T) fields, a `--belongs-to posts` child and a nested
 #      blogs -> articles -> remarks -> ratings chain, `gen page
 #      about`, and `gen auth` when the app has a database, all run through
-#      the app's own dev-dependency
+#      the app's own dev-dependency, then `refrakt diff` must find no
+#      differences except the path dependencies in gleam.toml
 #   4. `gleam build --warnings-as-errors`, `gleam test`, `gleam format --check`.
 #      With a database, `gleam test` includes the DB-backed tests that go
 #      through test/app/support/test_db.gleam (create/show/update/delete,
@@ -467,7 +468,41 @@ if [ "$db" != none ]; then
   deps_download
   add_multi_statement_migration
 fi
+# gen deploy (#26): its Dockerfile, .dockerignore, fly.toml and bin/migrate
+# are checked by refrakt diff below; test-docker-image.sh builds the image
+cli gen deploy --fly
+for file in Dockerfile .dockerignore fly.toml; do
+  [ -f "$file" ] || fail "gen deploy did not write $file"
+done
+grep -q '\["healthz"\], http.Get -> wisp.ok()' src/app/router.gleam ||
+  fail "gen deploy did not add GET /healthz to the router"
+if [ "$db" != none ]; then
+  [ -x bin/migrate ] || fail "gen deploy did not write an executable bin/migrate"
+fi
 cli routes
+
+# -----------------------------------------------------------------------------
+# refrakt diff (#27): a freshly generated app must match what the CLI renders
+# for it. This guards against generators that are not deterministic, and
+# against generators that forget to record themselves in
+# .refrakt/generated.toml. gleam.toml is the one expected difference: this
+# script pointed refrakt and refrakt_cli at path dependencies above.
+# -----------------------------------------------------------------------------
+
+step "Checking that refrakt diff finds no differences"
+grep -q '^\[new\]' .refrakt/generated.toml || fail "refrakt new wrote no .refrakt/generated.toml"
+cli diff src test priv ||
+  fail "refrakt diff reports differences in a freshly generated app"
+diff_output="$(cli diff --stat || true)"
+echo "$diff_output"
+echo "$diff_output" | grep -q "^Differ from the templates (1):" ||
+  fail "refrakt diff should report exactly one changed file (gleam.toml)"
+echo "$diff_output" | grep -q "^ gleam.toml | " ||
+  fail "refrakt diff did not report the path dependencies in gleam.toml"
+if echo "$diff_output" | grep -q "^Only in the templates"; then
+  fail "refrakt diff reports generated files missing from a fresh app"
+fi
+echo "ok  refrakt diff: only gleam.toml differs (path dependencies)"
 
 # create_database <name>: create a Postgres database unless it exists
 create_database() {
@@ -707,6 +742,7 @@ smoke_test_json_api() {
 step "Smoke-testing"
 expect 200 "$(status GET /)" "GET /"
 expect 200 "$(status GET /about)" "GET /about"
+expect 200 "$(status GET /healthz)" "GET /healthz (gen deploy)"
 expect 200 "$(status GET /posts)" "GET /posts"
 expect 200 "$(status GET /posts/new)" "GET /posts/new"
 expect 303 "$(status POST /posts \

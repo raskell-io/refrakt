@@ -5,6 +5,7 @@ import gleam/io
 import gleam/list
 import gleam/string
 import refrakt_cli/format
+import refrakt_cli/manifest
 import refrakt_cli/templates
 import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
 import simplifile
@@ -27,6 +28,7 @@ pub fn run(path: String, flags: List(String)) {
   // Create directory structure
   let dirs = [
     path,
+    path <> "/.refrakt",
     path <> "/src",
     path <> "/src/" <> name,
     path <> "/src/" <> name <> "/web",
@@ -50,6 +52,7 @@ pub fn run(path: String, flags: List(String)) {
   let files = [
     #(path <> "/gleam.toml", templates.gleam_toml(name, db)),
     #(path <> "/.gitignore", templates.gitignore()),
+    #(path <> "/" <> manifest.path, manifest.new_content(name, db)),
     #(path <> "/README.md", templates.readme(name, db)),
     #(path <> "/src/" <> name <> ".gleam", templates.main_module(name, db)),
     #(path <> "/src/" <> name <> "/config.gleam", templates.config_module(name)),
@@ -123,6 +126,7 @@ pub fn run(path: String, flags: List(String)) {
   io.println("    gleam.toml")
   io.println("    .gitignore")
   io.println("    README.md")
+  io.println("    .refrakt/generated.toml")
   io.println("    src/")
   io.println("      " <> name <> ".gleam")
   io.println("      " <> name <> "/config.gleam")

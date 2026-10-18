@@ -18,6 +18,7 @@ import gleam/result
 import gleam/string
 import refrakt_cli/format
 import refrakt_cli/gen
+import refrakt_cli/manifest
 import refrakt_cli/migrate_cmd
 import refrakt_cli/project
 import refrakt_cli/types.{type DbChoice, NoDb, Postgres, Sqlite}
@@ -41,7 +42,16 @@ pub fn run(args: List(String)) {
       io.println("Error: " <> message)
       io.println("Nothing was generated.")
     }
-    Ok(fly) -> generate(fly)
+    Ok(fly) -> {
+      generate(fly)
+      manifest.record([
+        "deploy",
+        ..case fly {
+          True -> ["--fly"]
+          False -> []
+        }
+      ])
+    }
   }
 }
 
