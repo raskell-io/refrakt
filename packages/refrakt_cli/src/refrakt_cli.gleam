@@ -76,7 +76,7 @@ fn print_help() {
       "  build                             Compile Lustre islands to JS",
       "  assets setup                      Set up Tailwind CSS",
       "  assets build                      Build CSS/JS assets",
-      "  dev                               Start the dev server",
+      "  dev                               Start the dev server (rebuilds, live reload)",
       "",
       "  help                              Show this help",
       "  version                           Show version",
