@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nested `--belongs-to` tests on Postgres (#44):** the DB-backed tests
+  of a child resource inserted their parent with a placeholder `1` for
+  the parent's own parent id, which the foreign key rejected on
+  Postgres. Parents are now inserted through generated fixture modules,
+  `test/<app>/support/<parent>_fixture.gleam`, whose `create(ctx)`
+  inserts the parent's own parent first, so a chain such as blogs →
+  posts → comments gets valid rows at every level. Existing child tests
+  keep their inline `create_<parent>` helper; regenerate them (or call
+  `<parent>_fixture.create(ctx).id`) to use the fixtures.
+
 ## [0.6.0] - 2026-10-17
 
 Milestone 0.6, "data and testing": a database test harness, pagination,

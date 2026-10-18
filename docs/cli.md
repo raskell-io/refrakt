@@ -100,7 +100,11 @@ key (`ON DELETE CASCADE`), `list_for_<parent>` (and, for HTML,
 otherwise), a select of parents in the form, and
 `web/components/<child>_list.gleam`, which the CLI renders on the
 parent's show page when the parent's handler is as generated (it
-prints the lines to add otherwise). Routes stay flat. Details in
+prints the lines to add otherwise). The child's DB-backed tests insert
+their parent through `test/<app>/support/<parent>_fixture.gleam`, which
+the CLI writes when it is missing, along with the fixtures of the
+parent's own parents (see [Testing](testing.md#fixtures-for---belongs-to-parents)).
+Routes stay flat. Details in
 [Relations](database.md#relations---belongs-to).
 
 **Errors.** An unknown field type (`price:money`), a spec without a

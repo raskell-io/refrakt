@@ -252,6 +252,35 @@ would end the test's transaction), and after a failing query, such as a
 unique constraint violation, Postgres refuses further queries in that
 transaction, so make it the last one in a test.
 
+### Fixtures for `--belongs-to` parents
+
+The DB-backed tests of a `--belongs-to` resource need a parent row
+first. `gen resource comments ... --belongs-to posts` writes
+`test/<app>/support/post_fixture.gleam` (once; later runs leave your
+copy alone), whose `create(ctx)` inserts a post with placeholder values
+through `post_repo.create` and returns it:
+
+```gleam
+let post_id = post_fixture.create(ctx).id
+```
+
+When the parent belongs to a parent of its own (blogs → posts →
+comments), the CLI writes that parent's fixture too, and each
+`create` inserts its parent first, so every foreign key points at a
+real row:
+
+```gleam
+pub fn create(ctx: Context) -> Post {
+  let params =
+    post_form.PostParams(title: "2026-01-01", blog_id: blog_fixture.create(ctx).id)
+  let assert Ok(post) = post_repo.create(ctx.db, params)
+  post
+}
+```
+
+Change the placeholder values when a validation or a constraint of
+yours needs other ones.
+
 `with_context` is built on `testing.with_database(open:, close:, run:)`
 from `refrakt/testing`, which opens a database, runs the test and always
 closes it (also after a failed assertion), and on
@@ -334,6 +363,7 @@ test/
   my_app_test.gleam                   ← entry point (runs gleeunit)
   my_app/support/
     test_db.gleam                     ← real database for tests
+    post_fixture.gleam                ← a post row (parents of --belongs-to)
   my_app/web/
     post_handler_test.gleam           ← resource tests
     auth_handler_test.gleam           ← auth tests
