@@ -168,9 +168,9 @@ INSERT INTO no_such_table (id) VALUES (1);
 SQL
   output="$(cli migrate)"
   echo "$output"
-  echo "$output" | grep -q "Error: Migration $name failed and was rolled back" ||
+  grep -q <<<"$output" "Error: Migration $name failed and was rolled back" ||
     fail "migrate did not report the failing migration $name"
-  echo "$output" | grep -q "no_such_table" ||
+  grep -q <<<"$output" "no_such_table" ||
     fail "migrate did not show the database error for $name"
 
   # 2 rows from the multi-statement migration, plus 1 from the DO block
@@ -200,12 +200,12 @@ SQL
   fi
   output="$(cli migrate)"
   echo "$output"
-  echo "$output" | grep -q "Done. 1 migration(s) applied" ||
+  grep -q <<<"$output" "Done. 1 migration(s) applied" ||
     fail "rewritten $name did not apply: the failed run was not rolled back or was recorded"
 
   output="$(cli migrate)"
   echo "$output"
-  echo "$output" | grep -q "Done. 0 migration(s) applied" ||
+  grep -q <<<"$output" "Done. 0 migration(s) applied" ||
     fail "a second migrate applied migrations again"
 }
 
@@ -235,12 +235,12 @@ generate_optional_and_relations() {
 
   output="$(cli gen resource widgets 'size:optional(money)')"
   echo "$output"
-  echo "$output" | grep -q "Unknown type" || fail "an unknown field type was not refused"
+  grep -q <<<"$output" "Unknown type" || fail "an unknown field type was not refused"
   [ ! -e src/app/web/widget_handler.gleam ] || fail "an unknown field type wrote files"
 
   output="$(cli gen resource drafts body:text --belongs-to nopes)"
   echo "$output"
-  echo "$output" | grep -q "there is no nopes resource" ||
+  grep -q <<<"$output" "there is no nopes resource" ||
     fail "--belongs-to a missing resource was not refused"
   [ ! -e src/app/web/draft_handler.gleam ] ||
     fail "--belongs-to a missing resource wrote files"
@@ -446,7 +446,7 @@ if [ "$db" = none ]; then
   # Resources and auth need a database; the CLI must refuse cleanly.
   resource_output="$(cli gen resource posts title:string body:text published:bool)"
   echo "$resource_output"
-  echo "$resource_output" | grep -q "No database configured" ||
+  grep -q <<<"$resource_output" "No database configured" ||
     fail "gen resource without a database did not refuse"
   [ ! -e src/app/web/post_handler.gleam ] ||
     fail "gen resource without a database wrote files"
@@ -495,11 +495,11 @@ cli diff src test priv ||
   fail "refrakt diff reports differences in a freshly generated app"
 diff_output="$(cli diff --stat || true)"
 echo "$diff_output"
-echo "$diff_output" | grep -q "^Differ from the templates (1):" ||
+grep -q <<<"$diff_output" "^Differ from the templates (1):" ||
   fail "refrakt diff should report exactly one changed file (gleam.toml)"
-echo "$diff_output" | grep -q "^ gleam.toml | " ||
+grep -q <<<"$diff_output" "^ gleam.toml | " ||
   fail "refrakt diff did not report the path dependencies in gleam.toml"
-if echo "$diff_output" | grep -q "^Only in the templates"; then
+if grep -q <<<"$diff_output" "^Only in the templates"; then
   fail "refrakt diff reports generated files missing from a fresh app"
 fi
 echo "ok  refrakt diff: only gleam.toml differs (path dependencies)"
@@ -564,8 +564,8 @@ fi
 step "Running migrations"
 migrate_output="$(cli migrate)"
 echo "$migrate_output"
-echo "$migrate_output" | grep -q "migration(s) applied" || fail "migrate did not apply migrations"
-echo "$migrate_output" | grep -q "_create_tags.sql ✓" ||
+grep -q <<<"$migrate_output" "migration(s) applied" || fail "migrate did not apply migrations"
+grep -q <<<"$migrate_output" "_create_tags.sql ✓" ||
   fail "migrate did not apply the multi-statement migration"
 
 step "Checking that a failing migration is rolled back"
@@ -793,7 +793,7 @@ expect 303 "$(status POST /register -D "$work/register.headers" \
 session_cookie="$(grep -i "^set-cookie: _session=" "$work/register.headers" || true)"
 [ -n "$session_cookie" ] || fail "register did not set the session cookie"
 for attribute in HttpOnly SameSite=Lax Max-Age=604800; do
-  echo "$session_cookie" | grep -q "$attribute" ||
+  grep -q <<<"$session_cookie" "$attribute" ||
     fail "session cookie lacks $attribute: $session_cookie"
 done
 echo "ok  session cookie: $session_cookie"

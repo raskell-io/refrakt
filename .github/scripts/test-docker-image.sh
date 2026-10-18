@@ -121,7 +121,7 @@ done
 [ -x bin/migrate ] || fail "bin/migrate is not executable"
 grep -q '\["healthz"\], http.Get' src/app/router.gleam || fail "no /healthz route"
 second="$(cli gen deploy --fly)"
-echo "$second" | grep -q "Skipped (already exists):" || fail "a second gen deploy did not skip"
+grep -q <<<"$second" "Skipped (already exists):" || fail "a second gen deploy did not skip"
 gleam_hex build --warnings-as-errors
 gleam format --check src test
 
@@ -183,7 +183,7 @@ if [ "$db" = sqlite ]; then
   docker run -d --name "$name-app" -p "$port:4000" \
     -e SECRET_KEY_BASE="$key" -v "$name-data:/data" "$image" > /dev/null
   wait_for_app
-  docker logs "$name-app" 2>&1 | grep -q "migration(s) applied" ||
+  grep -q <<<"$(docker logs "$name-app" 2>&1)" "migration(s) applied" ||
     fail "the container did not apply the migrations on start"
   [ "$(docker exec "$name-app" id -un)" = app ] || fail "the container does not run as the app user"
   smoke_test
@@ -193,7 +193,7 @@ if [ "$db" = sqlite ]; then
   wait_for_app
   expect 200 "$(status GET /posts)" "GET /posts after restart"
   grep -q "From Docker" "$work/body.html" || fail "the post did not survive a restart"
-  docker logs "$name-app" 2>&1 | grep -q "Done. 0 migration(s) applied" ||
+  grep -q <<<"$(docker logs "$name-app" 2>&1)" "Done. 0 migration(s) applied" ||
     fail "the restart did not find the migrations applied"
 else
   step "Starting postgres:17 on a Docker network"
@@ -217,10 +217,10 @@ else
   output="$(docker run --rm --network "$name-net" -e DATABASE_URL="$database_url" \
     -e SECRET_KEY_BASE="$key" "$image" bin/migrate)"
   echo "$output"
-  echo "$output" | grep -q "Done. 2 migration(s) applied" || fail "bin/migrate did not apply the migrations"
+  grep -q <<<"$output" "Done. 2 migration(s) applied" || fail "bin/migrate did not apply the migrations"
   output="$(docker run --rm --network "$name-net" -e DATABASE_URL="$database_url" \
     -e SECRET_KEY_BASE="$key" "$image" bin/migrate)"
-  echo "$output" | grep -q "Done. 0 migration(s) applied" || fail "a second bin/migrate applied migrations"
+  grep -q <<<"$output" "Done. 0 migration(s) applied" || fail "a second bin/migrate applied migrations"
 
   step "Running the app container"
   docker run -d --name "$name-app" --network "$name-net" -p "$port:4000" \
