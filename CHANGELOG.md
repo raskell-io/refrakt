@@ -13,7 +13,18 @@ templates generate differently, and apply what you want
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-18
+
+Milestone 0.7, "developer experience and shipping": live reload in
+`refrakt dev`, `refrakt gen deploy` (Dockerfile, fly.toml, migrations in
+production), `refrakt diff` for upgrades, and fixtures for nested
+relations.
+
 ### Upgrading
+
+- **Dependencies:** bump `refrakt` and the `refrakt_cli` dev-dependency
+  to `>= 0.7.0 and < 1.0.0`. Then run `refrakt diff` to see which
+  template changes below apply to your app.
 
 - **Live reload (optional):** to get live reload in an existing app,
   add the script to the end of the `<body>` in
@@ -511,7 +522,8 @@ Generated code belongs to your app, so existing projects need these edits by han
 - Library helpers for validation, flash messages, migrations and testing.
 - Documentation, tutorial and examples.
 
-[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/raskell-io/refrakt/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/raskell-io/refrakt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/raskell-io/refrakt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/raskell-io/refrakt/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/raskell-io/refrakt/compare/v0.4.0...v0.4.1
