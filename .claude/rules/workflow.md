@@ -199,7 +199,11 @@ Both packages share one version number and are released together.
    `gleam.toml` (`templates.gleam_toml`)
 3. Update `CHANGELOG.md`: rename `## [Unreleased]` to
    `## [X.Y.Z] - YYYY-MM-DD`, add a fresh `## [Unreleased]`, fix the
-   compare links at the bottom
+   compare links at the bottom. If any template changed (anything an
+   existing app would get differently from `refrakt diff`), the section
+   must have an `### Upgrading` list with the hand edit for each change.
+   Generated code belongs to the app, so this is the only way existing
+   apps learn about it
 4. Commit: `chore: bump version to X.Y.Z`
 5. Tag: `git tag vX.Y.Z`
 6. Push: `git push && git push --tags`
