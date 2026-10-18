@@ -308,20 +308,61 @@ copies output to `priv/static/js/islands/`.
 
 ### `refrakt dev`
 
-Start the dev server with file watching.
+Run the app in development, rebuild on changes and reload open pages.
 
 ```bash
 refrakt dev
 ```
 
-Sets `APP_ENV=dev` and runs `gleam run`. If `fswatch` is installed,
-watches `src/` for changes and auto-rebuilds + restarts.
+Sets `APP_ENV=dev`, runs `gleam build` and starts the app with
+`gleam run`. Then it watches `src/` and `priv/`:
 
-```bash
-refrakt dev
-```
+- **A change under `src/`** runs `gleam build`. When the build succeeds,
+  the server restarts and open pages reload once the new server accepts
+  connections. When it fails, the compiler error is printed and the
+  previous server keeps running; the next successful build takes over.
+- **A change only under `priv/`** (CSS, JS, images) needs no rebuild,
+  since static files are served as they are: open pages just reload.
+- **Bursts of events** (an editor saving in several steps, switching
+  branches) are debounced into one rebuild: `refrakt dev` waits until no
+  event has arrived for 200ms. Editor scratch files (dotfiles such as
+  `.post.gleam.swp`, `post.gleam~`, vim's `4913`) are ignored.
 
-Wraps `gleam run` with the dev environment variable set.
+**Watchers.** At startup `refrakt dev` says which watcher it uses:
+
+| Watcher | When |
+|---------|------|
+| `fswatch` | installed (`brew install fswatch`, or your Linux package manager) |
+| `inotifywait` | on Linux without `fswatch`, from `inotify-tools` |
+| polling | otherwise: compares size, time and contents of every file under `src/` and `priv/` every 500ms |
+
+Polling works everywhere and needs nothing installed; the other two
+notice changes sooner and cost nothing while idle. If `fswatch` or
+`inotifywait` exits, `refrakt dev` falls back to polling that directory.
+
+**Live reload.** `refrakt dev` runs a small Server-Sent Events server
+next to your app, on `http://localhost:35729/events`, and passes its
+port to the app as `REFRAKT_LIVE_RELOAD_PORT`. The generated root layout
+ends its `<body>` with `live_reload.script()` from `refrakt/live_reload`,
+a few lines of JavaScript that open an `EventSource` to that address and
+call `location.reload()` on a `reload` event. `refrakt dev` sends that
+event after each restart and after each `priv/` change.
+
+Nothing of this reaches production: `live_reload.script()` renders
+nothing unless `APP_ENV=dev` *and* `REFRAKT_LIVE_RELOAD_PORT` holds a
+port, so with `APP_ENV=prod` or `APP_ENV=test` (or `gleam run` on its
+own) the page has no script, and the app itself never serves a reload
+endpoint; the event stream lives in the `refrakt dev` process.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PORT` | `4000` | The app's port; `refrakt dev` waits for it before reloading pages |
+| `REFRAKT_LIVE_RELOAD_PORT` | `35729` | Port of the live reload event stream |
+
+If the live reload port is taken, `refrakt dev` says so and runs without
+live reload; set `REFRAKT_LIVE_RELOAD_PORT` to a free port. Apps
+generated before 0.7 need one line in their root layout to get live
+reload; see the changelog.
 
 ---
 

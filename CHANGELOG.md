@@ -6,6 +6,50 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Live reload (optional):** to get live reload in an existing app,
+  add the script to the end of the `<body>` in
+  `src/<app>/web/layouts/root_layout.gleam` (it needs the `refrakt`
+  release that ships `refrakt/live_reload`):
+
+  ```gleam
+  import refrakt/live_reload
+
+  // in wrap:
+  body([], [main([class("container")], [inner]), live_reload.script()]),
+  ```
+
+  It renders nothing outside `refrakt dev` with `APP_ENV=dev`, so
+  production and tests are unchanged. Without it, `refrakt dev` still
+  rebuilds and restarts; pages just don't reload themselves.
+
+### Added
+
+- **Live reload in `refrakt dev` (#25):** after a successful rebuild and
+  restart, or a change under `priv/`, open pages reload. `refrakt dev`
+  serves a Server-Sent Events stream on `REFRAKT_LIVE_RELOAD_PORT`
+  (default 35729) and the new `refrakt/live_reload.script()`, which new
+  apps put in their root layout, reloads the page on its `reload` event.
+  The script renders only with `APP_ENV=dev` under `refrakt dev`; the
+  app never serves a reload endpoint itself. See
+  [CLI reference](docs/cli.md#refrakt-dev).
+- **Watcher fallback in `refrakt dev` (#25):** without `fswatch`,
+  `refrakt dev` uses `inotifywait` on Linux, else polls `src/` and
+  `priv/` every 500ms, and says at startup which watcher it uses.
+
+### Changed
+
+- `refrakt dev` builds before restarting: a compile error is printed and
+  the previous server keeps running until the next successful build
+  (before, the server was stopped first). Bursts of file events are
+  debounced into one rebuild, editor scratch files are ignored, `priv/`
+  is watched too (a change there reloads pages without a rebuild), and
+  the server (with the Erlang VM `gleam run` started) and the watcher
+  stop with `refrakt dev`, even when it is killed, instead of keeping the
+  port. A server that exits no longer ends `refrakt dev`; the next save
+  restarts it.
+
 ## [0.6.0] - 2026-10-17
 
 Milestone 0.6, "data and testing": a database test harness, pagination,

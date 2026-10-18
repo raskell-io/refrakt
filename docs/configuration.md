@@ -11,6 +11,7 @@ record, or a `ConfigError` that stops the app from starting.
 | `PORT` | `4000` | HTTP server port |
 | `SECRET_KEY_BASE` | dev fallback, none in prod | Secret for signing cookies (64+ bytes) |
 | `APP_ENV` | `dev` (with a startup warning) | Environment: `dev`, `test`, or `prod` |
+| `REFRAKT_LIVE_RELOAD_PORT` | `35729`, set by `refrakt dev` | Port of the live reload event stream; see [`refrakt dev`](cli.md#refrakt-dev) |
 
 `refrakt dev` sets `APP_ENV=dev` itself. Running the app any other way
 without `APP_ENV` also means `dev`, and `main` logs a warning, since
