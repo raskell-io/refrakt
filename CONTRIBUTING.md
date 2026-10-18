@@ -66,6 +66,43 @@ for the smoke test (default 4000).
 
 The example apps are checked with `mise run test:examples`.
 
+### Checking `refrakt dev` by hand
+
+CI doesn't run `refrakt dev`: the unit tests in
+`packages/refrakt_cli/test/refrakt_cli/dev_test.gleam` cover watcher
+choice, change detection, debouncing and the event stream, and
+`packages/refrakt/test/refrakt/live_reload_test.gleam` covers the script
+appearing only in dev, but the rebuild/restart loop needs a running app
+and real timing. If you touched `dev.gleam`, `refrakt_cli_dev_ffi.erl` or
+`refrakt/live_reload`, check a generated SQLite app (the one the script
+above leaves in its work directory works):
+
+1. In the app, run `gleam run -m refrakt_cli -- dev`. It prints which
+   watcher it uses (fswatch, inotifywait or polling) and
+   `Live reload on http://localhost:35729/events`.
+2. Open `http://localhost:4000/` in a browser; the page source ends with
+   a `<script data-refrakt-live-reload>`. In another terminal, run
+   `curl -N http://localhost:35729/events`.
+3. Edit the text in `src/<app>/web/home_handler.gleam`. The terminal
+   shows one rebuild, curl prints `event: reload`, and the browser shows
+   the new text without a manual reload.
+4. Add a syntax error and save. The compiler error is printed, followed
+   by `Build failed. The previous server keeps running`; the page still
+   loads, and curl prints no event.
+5. Fix the error and save: the server restarts and the page reloads.
+6. Append a comment to `priv/static/css/app.css`: the page reloads with
+   no rebuild.
+7. Save several files at once (e.g. `touch src/<app>/web/*.gleam`): one
+   rebuild, not one per file.
+8. Repeat step 3 with the fallback watcher: run `refrakt dev` with a
+   `PATH` that lacks `fswatch` (and `inotifywait`), and check that it says
+   it is polling.
+9. Stop `refrakt dev` (Ctrl-C, or `kill` its Erlang VM). The app's port
+   is free again and no `gleam run` is left (`ps`).
+10. `APP_ENV=prod SECRET_KEY_BASE=$(openssl rand -hex 64) gleam run`
+    (with `REFRAKT_LIVE_RELOAD_PORT=35729` exported, to be sure): the
+    page has no live reload script.
+
 ## Project structure
 
 ```
@@ -78,6 +115,7 @@ packages/
       migrate.gleam            ← migration runner
       testing.gleam            ← test helpers
       dev_error.gleam          ← dev error page
+      live_reload.gleam        ← live reload script for refrakt dev
       ...                      ← jobs, token, mailer, paginate, upload, cors,
                                  rate_limit, pubsub, telemetry
     test/
@@ -93,7 +131,9 @@ packages/
       diff.gleam               ← refrakt_cli diff (replays generators)
       manifest.gleam           ← .refrakt/generated.toml
       build.gleam              ← refrakt_cli build (island JS)
-      dev.gleam                ← refrakt_cli dev
+      dev.gleam                ← refrakt_cli dev (watcher choice, debounce,
+                                 change detection; process work in
+                                 src/refrakt_cli_dev_ffi.erl)
       migrate_cmd.gleam        ← refrakt_cli migrate
       seed.gleam               ← refrakt_cli seed
       assets.gleam             ← refrakt_cli assets

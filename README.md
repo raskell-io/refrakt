@@ -146,7 +146,7 @@ Run inside a generated app as `gleam run -m refrakt_cli -- <command>`
 | `refrakt seed` | Run database seeds |
 | `refrakt build` | Compile Lustre islands to JavaScript |
 | `refrakt assets setup` / `assets build` | Set up and build Tailwind CSS assets |
-| `refrakt dev` | Dev server with file watching (auto-rebuild) |
+| `refrakt dev` | Dev server: rebuilds on changes, keeps the last good build on a compile error, reloads open pages |
 | `refrakt routes` | Print the route table |
 | `refrakt diff` | Diff the app against what the current templates generate |
 
@@ -182,7 +182,7 @@ Run inside a generated app as `gleam run -m refrakt_cli -- <command>`
 - [x] Pagination, file uploads, CORS and rate-limiting middleware
 - [x] Topic-based pub/sub and basic request telemetry
 - [x] Dev error page (dark theme, error details, stack trace, request info)
-- [x] Dev file watcher (auto-rebuild on `src/` changes via fswatch)
+- [x] Dev server with live reload (fswatch, inotifywait or polling; the last good build keeps running on a compile error)
 - [x] Auto-format all generated code
 - [x] Route table printer
 - [x] 49 package tests (30 library + 19 CLI) and CI that generates, builds, tests and boots apps for every database option

@@ -13,54 +13,23 @@ templates generate differently, and apply what you want
 
 ## [Unreleased]
 
-### Added
-
-- **`refrakt gen deploy [--fly]` (#26):** writes a multi-stage
-  `Dockerfile` (Gleam 1.19.2 / Erlang/OTP 29.1.1 Alpine build stage
-  with `build-base` for the argus and sqlight NIFs, `gleam export
-  erlang-shipment`; slim `erlang:29.1.1-alpine` runtime as a non-root
-  user with `APP_ENV=prod`, `HOST=0.0.0.0`, `PORT`, `EXPOSE` and a
-  `HEALTHCHECK`), a `.dockerignore`, and with `--fly` a `fly.toml`
-  (health check, `release_command` on Postgres, `/data` volume on
-  SQLite). Apps with a database get `bin/migrate`, which runs the
-  compiled `<app>/migrate` module from the shipment
-  (`erl ... -eval '<app>@@main:run(<app>@migrate)'`): SQLite images run
-  it on start, Postgres deploys before a release. Adds `GET /healthz`
-  to the router when there is no health route. Never overwrites a file.
-- New apps read `HOST` (default `localhost`) and listen on it through
-  `mist.bind(cfg.host)`, and SQLite apps read `DATABASE_PATH` (default
-  `<app>.db`).
-- `refrakt diff [path...]` shows how an app differs from what the
-  installed refrakt_cli generates for it, as a unified diff per file,
-  framework files (router, config, layouts, middleware, session, test
-  support) first, plus a summary of files missing from the app and of
-  the app's own files. `--stat` lists the changed files only. It exits
-  with 1 when generated files differ, so CI can use it, and never writes
-  into the app (#27).
-- `refrakt new` writes `.refrakt/generated.toml`, and `gen page`,
-  `gen resource`, `gen auth`, `gen island` and `gen live` record their
-  arguments in it, so `refrakt diff` can replay them. For apps created
-  before this release `refrakt diff` infers the generators from the
-  app's files; `refrakt diff --print-manifest` prints the inferred
-  manifest to save and correct (#27).
-
-### Changed
-
-- The generated `src/<app>/migrate.gleam` exits with status 1 when a
-  migration fails, so a deploy that runs it stops.
-
-### Fixed
-
-- **Nested `--belongs-to` tests on Postgres (#44):** the DB-backed tests
-  of a child resource inserted their parent with a placeholder `1` for
-  the parent's own parent id, which the foreign key rejected on
-  Postgres. Parents are now inserted through generated fixture modules,
-  `test/<app>/support/<parent>_fixture.gleam`, whose `create(ctx)`
-  inserts the parent's own parent first, so a chain such as blogs →
-  posts → comments gets valid rows at every level.
-
 ### Upgrading
 
+- **Live reload (optional):** to get live reload in an existing app,
+  add the script to the end of the `<body>` in
+  `src/<app>/web/layouts/root_layout.gleam` (it needs the `refrakt`
+  release that ships `refrakt/live_reload`):
+
+  ```gleam
+  import refrakt/live_reload
+
+  // in wrap:
+  body([], [main([class("container")], [inner]), live_reload.script()]),
+  ```
+
+  It renders nothing outside `refrakt dev` with `APP_ENV=dev`, so
+  production and tests are unchanged. Without it, `refrakt dev` still
+  rebuilds and restarts; pages just don't reload themselves.
 - **Manifest (optional):** to make `refrakt diff` exact for an existing
   app, run `mkdir -p .refrakt && refrakt diff --print-manifest >
   .refrakt/generated.toml`, check the inferred generators, and commit
@@ -83,6 +52,72 @@ templates generate differently, and apply what you want
   for a nested `--belongs-to`. Regenerate the child, or replace the
   helper with `<parent>_fixture.create(ctx).id` after generating a
   sibling child (which writes the fixture).
+
+### Added
+
+- **`refrakt gen deploy [--fly]` (#26):** writes a multi-stage
+  `Dockerfile` (Gleam 1.19.2 / Erlang/OTP 29.1.1 Alpine build stage
+  with `build-base` for the argus and sqlight NIFs, `gleam export
+  erlang-shipment`; slim `erlang:29.1.1-alpine` runtime as a non-root
+  user with `APP_ENV=prod`, `HOST=0.0.0.0`, `PORT`, `EXPOSE` and a
+  `HEALTHCHECK`), a `.dockerignore`, and with `--fly` a `fly.toml`
+  (health check, `release_command` on Postgres, `/data` volume on
+  SQLite). Apps with a database get `bin/migrate`, which runs the
+  compiled `<app>/migrate` module from the shipment
+  (`erl ... -eval '<app>@@main:run(<app>@migrate)'`): SQLite images run
+  it on start, Postgres deploys before a release. Adds `GET /healthz`
+  to the router when there is no health route. Never overwrites a file.
+- New apps read `HOST` (default `localhost`) and listen on it through
+  `mist.bind(cfg.host)`, and SQLite apps read `DATABASE_PATH` (default
+  `<app>.db`).
+- **Live reload in `refrakt dev` (#25):** after a successful rebuild and
+  restart, or a change under `priv/`, open pages reload. `refrakt dev`
+  serves a Server-Sent Events stream on `REFRAKT_LIVE_RELOAD_PORT`
+  (default 35729) and the new `refrakt/live_reload.script()`, which new
+  apps put in their root layout, reloads the page on its `reload` event.
+  The script renders only with `APP_ENV=dev` under `refrakt dev`; the
+  app never serves a reload endpoint itself. See
+  [CLI reference](docs/cli.md#refrakt-dev).
+- **Watcher fallback in `refrakt dev` (#25):** without `fswatch`,
+  `refrakt dev` uses `inotifywait` on Linux, else polls `src/` and
+  `priv/` every 500ms, and says at startup which watcher it uses.
+- `refrakt diff [path...]` shows how an app differs from what the
+  installed refrakt_cli generates for it, as a unified diff per file,
+  framework files (router, config, layouts, middleware, session, test
+  support) first, plus a summary of files missing from the app and of
+  the app's own files. `--stat` lists the changed files only. It exits
+  with 1 when generated files differ, so CI can use it, and never writes
+  into the app (#27).
+- `refrakt new` writes `.refrakt/generated.toml`, and `gen page`,
+  `gen resource`, `gen auth`, `gen island`, `gen live` and `gen deploy` record their
+  arguments in it, so `refrakt diff` can replay them. For apps created
+  before this release `refrakt diff` infers the generators from the
+  app's files; `refrakt diff --print-manifest` prints the inferred
+  manifest to save and correct (#27).
+
+### Changed
+
+- The generated `src/<app>/migrate.gleam` exits with status 1 when a
+  migration fails, so a deploy that runs it stops.
+- `refrakt dev` builds before restarting: a compile error is printed and
+  the previous server keeps running until the next successful build
+  (before, the server was stopped first). Bursts of file events are
+  debounced into one rebuild, editor scratch files are ignored, `priv/`
+  is watched too (a change there reloads pages without a rebuild), and
+  the server (with the Erlang VM `gleam run` started) and the watcher
+  stop with `refrakt dev`, even when it is killed, instead of keeping the
+  port. A server that exits no longer ends `refrakt dev`; the next save
+  restarts it.
+
+### Fixed
+
+- **Nested `--belongs-to` tests on Postgres (#44):** the DB-backed tests
+  of a child resource inserted their parent with a placeholder `1` for
+  the parent's own parent id, which the foreign key rejected on
+  Postgres. Parents are now inserted through generated fixture modules,
+  `test/<app>/support/<parent>_fixture.gleam`, whose `create(ctx)`
+  inserts the parent's own parent first, so a chain such as blogs →
+  posts → comments gets valid rows at every level.
 
 ## [0.6.0] - 2026-10-17
 

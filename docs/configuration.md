@@ -14,6 +14,7 @@ record, or a `ConfigError` that stops the app from starting.
 | `APP_ENV` | `dev` (with a startup warning) | Environment: `dev`, `test`, or `prod` |
 | `DATABASE_URL` | local `<app>_dev` / `<app>_test` | PostgreSQL connection URL (`data/repo.gleam`) |
 | `DATABASE_PATH` | `<app>.db` | SQLite database file outside of tests (`data/repo.gleam`) |
+| `REFRAKT_LIVE_RELOAD_PORT` | `35729`, set by `refrakt dev` | Port of the live reload event stream; see [`refrakt dev`](cli.md#refrakt-dev) |
 
 `refrakt dev` sets `APP_ENV=dev` itself. Running the app any other way
 without `APP_ENV` also means `dev`, and `main` logs a warning, since
