@@ -6,7 +6,8 @@
 #   2. point the app at the in-repo library and CLI (path dependencies),
 #      so the check covers HEAD rather than whatever is on Hex
 #   3. `gen resource posts ...`, `gen resource memos ... --api`, resources
-#      with optional(T) fields and a `--belongs-to posts` child, `gen page
+#      with optional(T) fields, a `--belongs-to posts` child and a nested
+#      blogs -> articles -> remarks -> ratings chain, `gen page
 #      about`, and `gen auth` when the app has a database, all run through
 #      the app's own dev-dependency, then `refrakt diff` must find no
 #      differences except the path dependencies in gleam.toml
@@ -167,9 +168,9 @@ INSERT INTO no_such_table (id) VALUES (1);
 SQL
   output="$(cli migrate)"
   echo "$output"
-  echo "$output" | grep -q "Error: Migration $name failed and was rolled back" ||
+  grep -q <<<"$output" "Error: Migration $name failed and was rolled back" ||
     fail "migrate did not report the failing migration $name"
-  echo "$output" | grep -q "no_such_table" ||
+  grep -q <<<"$output" "no_such_table" ||
     fail "migrate did not show the database error for $name"
 
   # 2 rows from the multi-statement migration, plus 1 from the DO block
@@ -199,12 +200,12 @@ SQL
   fi
   output="$(cli migrate)"
   echo "$output"
-  echo "$output" | grep -q "Done. 1 migration(s) applied" ||
+  grep -q <<<"$output" "Done. 1 migration(s) applied" ||
     fail "rewritten $name did not apply: the failed run was not rolled back or was recorded"
 
   output="$(cli migrate)"
   echo "$output"
-  echo "$output" | grep -q "Done. 0 migration(s) applied" ||
+  grep -q <<<"$output" "Done. 0 migration(s) applied" ||
     fail "a second migrate applied migrations again"
 }
 
@@ -234,15 +235,50 @@ generate_optional_and_relations() {
 
   output="$(cli gen resource widgets 'size:optional(money)')"
   echo "$output"
-  echo "$output" | grep -q "Unknown type" || fail "an unknown field type was not refused"
+  grep -q <<<"$output" "Unknown type" || fail "an unknown field type was not refused"
   [ ! -e src/app/web/widget_handler.gleam ] || fail "an unknown field type wrote files"
 
   output="$(cli gen resource drafts body:text --belongs-to nopes)"
   echo "$output"
-  echo "$output" | grep -q "there is no nopes resource" ||
+  grep -q <<<"$output" "there is no nopes resource" ||
     fail "--belongs-to a missing resource was not refused"
   [ ! -e src/app/web/draft_handler.gleam ] ||
     fail "--belongs-to a missing resource wrote files"
+}
+
+# -----------------------------------------------------------------------------
+# Nested --belongs-to chains (#44)
+#
+# generate_nested_relations runs inside the app directory. It generates a
+# chain blogs -> articles -> remarks (HTML) -> ratings (--api), where every
+# level belongs to the one before. The DB-backed tests of each child insert
+# their parent through test/app/support/<parent>_fixture.gleam, which
+# inserts its own parent first, so the foreign keys hold on Postgres (SQLite
+# only enforces them in `delete`). `gleam test` below runs those tests.
+# -----------------------------------------------------------------------------
+
+generate_nested_relations() {
+  local fixture
+  cli gen resource blogs name:string
+  cli gen resource articles title:string --belongs-to blogs
+  cli gen resource remarks body:text --belongs-to articles
+  cli gen resource ratings stars:int --belongs-to remarks --api
+
+  for fixture in blog article remark; do
+    [ -f "test/app/support/${fixture}_fixture.gleam" ] ||
+      fail "no test/app/support/${fixture}_fixture.gleam for the chain"
+  done
+  [ ! -e test/app/support/rating_fixture.gleam ] ||
+    fail "a fixture was written for ratings, which nothing belongs to"
+  grep -q "blog_id: blog_fixture.create(ctx).id" test/app/support/article_fixture.gleam ||
+    fail "article_fixture does not insert the blog it belongs to"
+  grep -q "article_id: article_fixture.create(ctx).id" test/app/support/remark_fixture.gleam ||
+    fail "remark_fixture does not insert the article it belongs to"
+  grep -q "let article_id = article_fixture.create(ctx).id" test/app/web/remark_handler_test.gleam ||
+    fail "the remarks tests do not insert their article through article_fixture"
+  grep -q "let remark_id = remark_fixture.create(ctx).id" test/app/web/rating_handler_test.gleam ||
+    fail "the ratings API tests do not insert their remark through remark_fixture"
+  echo "ok  blogs -> articles -> remarks -> ratings fixtures build the whole chain"
 }
 
 # body_has <text> <what> / body_lacks <text> <what>: check the last response
@@ -410,7 +446,7 @@ if [ "$db" = none ]; then
   # Resources and auth need a database; the CLI must refuse cleanly.
   resource_output="$(cli gen resource posts title:string body:text published:bool)"
   echo "$resource_output"
-  echo "$resource_output" | grep -q "No database configured" ||
+  grep -q <<<"$resource_output" "No database configured" ||
     fail "gen resource without a database did not refuse"
   [ ! -e src/app/web/post_handler.gleam ] ||
     fail "gen resource without a database wrote files"
@@ -423,6 +459,7 @@ else
   cli gen resource memos title:string body:text pinned:bool rating:int --api
   cli gen resource readings value:float count:int --api
   generate_optional_and_relations
+  generate_nested_relations
 fi
 cli gen page about
 if [ "$db" != none ]; then
@@ -430,6 +467,17 @@ if [ "$db" != none ]; then
   # gen auth adds argus to gleam.toml
   deps_download
   add_multi_statement_migration
+fi
+# gen deploy (#26): its Dockerfile, .dockerignore, fly.toml and bin/migrate
+# are checked by refrakt diff below; test-docker-image.sh builds the image
+cli gen deploy --fly
+for file in Dockerfile .dockerignore fly.toml; do
+  [ -f "$file" ] || fail "gen deploy did not write $file"
+done
+grep -q '\["healthz"\], http.Get -> wisp.ok()' src/app/router.gleam ||
+  fail "gen deploy did not add GET /healthz to the router"
+if [ "$db" != none ]; then
+  [ -x bin/migrate ] || fail "gen deploy did not write an executable bin/migrate"
 fi
 cli routes
 
@@ -447,11 +495,11 @@ cli diff src test priv ||
   fail "refrakt diff reports differences in a freshly generated app"
 diff_output="$(cli diff --stat || true)"
 echo "$diff_output"
-echo "$diff_output" | grep -q "^Differ from the templates (1):" ||
+grep -q <<<"$diff_output" "^Differ from the templates (1):" ||
   fail "refrakt diff should report exactly one changed file (gleam.toml)"
-echo "$diff_output" | grep -q "^ gleam.toml | " ||
+grep -q <<<"$diff_output" "^ gleam.toml | " ||
   fail "refrakt diff did not report the path dependencies in gleam.toml"
-if echo "$diff_output" | grep -q "^Only in the templates"; then
+if grep -q <<<"$diff_output" "^Only in the templates"; then
   fail "refrakt diff reports generated files missing from a fresh app"
 fi
 echo "ok  refrakt diff: only gleam.toml differs (path dependencies)"
@@ -516,8 +564,8 @@ fi
 step "Running migrations"
 migrate_output="$(cli migrate)"
 echo "$migrate_output"
-echo "$migrate_output" | grep -q "migration(s) applied" || fail "migrate did not apply migrations"
-echo "$migrate_output" | grep -q "_create_tags.sql ✓" ||
+grep -q <<<"$migrate_output" "migration(s) applied" || fail "migrate did not apply migrations"
+grep -q <<<"$migrate_output" "_create_tags.sql ✓" ||
   fail "migrate did not apply the multi-statement migration"
 
 step "Checking that a failing migration is rolled back"
@@ -694,6 +742,7 @@ smoke_test_json_api() {
 step "Smoke-testing"
 expect 200 "$(status GET /)" "GET /"
 expect 200 "$(status GET /about)" "GET /about"
+expect 200 "$(status GET /healthz)" "GET /healthz (gen deploy)"
 expect 200 "$(status GET /posts)" "GET /posts"
 expect 200 "$(status GET /posts/new)" "GET /posts/new"
 expect 303 "$(status POST /posts \
@@ -744,7 +793,7 @@ expect 303 "$(status POST /register -D "$work/register.headers" \
 session_cookie="$(grep -i "^set-cookie: _session=" "$work/register.headers" || true)"
 [ -n "$session_cookie" ] || fail "register did not set the session cookie"
 for attribute in HttpOnly SameSite=Lax Max-Age=604800; do
-  echo "$session_cookie" | grep -q "$attribute" ||
+  grep -q <<<"$session_cookie" "$attribute" ||
     fail "session cookie lacks $attribute: $session_cookie"
 done
 echo "ok  session cookie: $session_cookie"

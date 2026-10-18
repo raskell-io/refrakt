@@ -50,6 +50,10 @@ run = "for p in $REFRAKT_PACKAGES; do (cd $p && gleam test) || exit 1; done"
 description = "Generate an app with the in-repo CLI and build/test/boot it (arg: none|sqlite|postgres)"
 run = ".github/scripts/test-generated-app.sh"
 
+[tasks."test:docker"]
+description = "Generate an app, docker build its gen deploy image and smoke-test it (arg: sqlite|postgres)"
+run = ".github/scripts/test-docker-image.sh"
+
 [tasks."test:examples"]
 description = "Build and test the example apps"
 run = "for e in examples/blog examples/tasks_app; do (cd $e && gleam format --check src test && gleam build --warnings-as-errors && gleam test) || exit 1; done"

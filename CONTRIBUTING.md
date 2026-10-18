@@ -127,6 +127,7 @@ packages/
       gen.gleam                ← gen resource, page, auth, island, live, migration
       templates.gleam          ← file content templates
       routes.gleam             ← refrakt_cli routes
+      deploy.gleam             ← gen deploy (Dockerfile, fly.toml, bin/migrate)
       diff.gleam               ← refrakt_cli diff (replays generators)
       manifest.gleam           ← .refrakt/generated.toml
       build.gleam              ← refrakt_cli build (island JS)

@@ -19,6 +19,7 @@ import gleam/option.{None, Some}
 import gleam/order
 import gleam/result
 import gleam/string
+import refrakt_cli/deploy
 import refrakt_cli/gen
 import refrakt_cli/manifest.{type Manifest, Manifest}
 import refrakt_cli/new
@@ -292,6 +293,7 @@ fn replay(args: List(String)) -> Result(fn() -> Nil, Nil) {
     ["auth"] -> Ok(fn() { gen.auth() })
     ["island", name] -> Ok(fn() { gen.island(name) })
     ["live", name] -> Ok(fn() { gen.live(name) })
+    ["deploy", ..flags] -> Ok(fn() { deploy.run(flags) })
     _ -> Error(Nil)
   }
 }
@@ -403,13 +405,22 @@ fn in_scope(path: String, paths: List(String)) -> Bool {
 }
 
 /// Files in the app that the templates could have written: everything
-/// under src/, test/ and priv/, and the files in the root.
+/// under src/, test/ and priv/, the files in the root, and the files of
+/// `gen deploy` (Dockerfile, .dockerignore, fly.toml, bin/migrate).
 fn app_files() -> List(String) {
   let nested =
     ["src", "test", "priv"]
     |> list.flat_map(fn(dir) { simplifile.get_files(dir) |> result.unwrap([]) })
   let top =
-    [".gitignore", "README.md", "gleam.toml"]
+    [
+      ".gitignore",
+      "README.md",
+      "gleam.toml",
+      "Dockerfile",
+      ".dockerignore",
+      "fly.toml",
+      "bin/migrate",
+    ]
     |> list.filter(fn(path) { simplifile.is_file(path) == Ok(True) })
   list.append(top, nested)
 }

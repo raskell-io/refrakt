@@ -102,7 +102,11 @@ key (`ON DELETE CASCADE`), `list_for_<parent>` (and, for HTML,
 otherwise), a select of parents in the form, and
 `web/components/<child>_list.gleam`, which the CLI renders on the
 parent's show page when the parent's handler is as generated (it
-prints the lines to add otherwise). Routes stay flat. Details in
+prints the lines to add otherwise). The child's DB-backed tests insert
+their parent through `test/<app>/support/<parent>_fixture.gleam`, which
+the CLI writes when it is missing, along with the fixtures of the
+parent's own parents (see [Testing](testing.md#fixtures-for---belongs-to-parents)).
+Routes stay flat. Details in
 [Relations](database.md#relations---belongs-to).
 
 **Errors.** An unknown field type (`price:money`), a spec without a
@@ -204,6 +208,43 @@ the project's database. Requires a database (`--db postgres` or
 `--db sqlite`).
 
 See [Authentication](authentication.md) for details.
+
+---
+
+### `refrakt gen deploy [--fly]`
+
+Generate the files to run the app in a container.
+
+```bash
+refrakt gen deploy          # Dockerfile, .dockerignore
+refrakt gen deploy --fly    # also fly.toml
+```
+
+**Creates** (each only if it does not exist; existing files are listed
+as skipped and left alone):
+
+- `Dockerfile`: a build stage on `ghcr.io/gleam-lang/gleam` (Erlang,
+  Alpine) with a C toolchain for NIFs (argus, sqlight) that runs
+  `gleam export erlang-shipment`, and a runtime stage on the matching
+  `erlang` Alpine image that runs the shipment as a non-root user with
+  `APP_ENV=prod`, `HOST=0.0.0.0`, `PORT=4000` and a `HEALTHCHECK`.
+- `.dockerignore`: `build`, `.git`, SQLite files, `.env` files.
+- With a database: `bin/migrate`, which runs `src/<app>/migrate.gleam`
+  from the shipment, and that module if `refrakt migrate` has not
+  written it yet. SQLite images migrate on start, Postgres ones through
+  `bin/migrate` before a release.
+- With `--fly`: `fly.toml` with the app name, internal port,
+  `APP_ENV=prod`, an HTTP health check, and a `release_command`
+  (Postgres) or a volume mount on `/data` (SQLite).
+
+**Patches:** `router.gleam` with `GET /healthz` (200) unless it already
+has a `["healthz"]` or `["health"]` route, which the health checks then
+use.
+
+Prints the `docker build` / `docker run` and `fly` commands to run
+next, and warns when gleam.toml requires a Gleam the image does not
+have, or when an app generated before 0.7 does not read `HOST` or
+`DATABASE_PATH`. See [Deployment](deployment.md).
 
 ---
 
@@ -327,8 +368,14 @@ Lines with + are what this refrakt_cli generates; lines with - are the app's.
   app lacks, shown as new files in the diff, such as a module a newer
   version added.
 - **Only in the app:** your own files under `src/`, `test/` and `priv/`
-  (hand-written modules, `gen migration` files). Listed for reference,
-  never compared.
+  (hand-written modules, `gen migration` files), and a `Dockerfile`,
+  `.dockerignore`, `fly.toml` or `bin/migrate` that `gen deploy` did not
+  write. Listed for reference, never compared.
+
+The files of `gen deploy` (`Dockerfile`, `.dockerignore`, `fly.toml`,
+`bin/migrate`) are compared like the others, so a newer Dockerfile
+template shows up as a difference; `refrakt diff src test priv` leaves
+them out.
 
 Migration numbers depend on how many migrations existed when a generator
 ran, so a rendered `003_create_posts.sql` is compared with the app's
@@ -341,8 +388,8 @@ its templates exactly, or limited to the files you never customise:
 `refrakt diff src/my_app/web/layouts`.
 
 **Which generators ran:** `refrakt new` writes `.refrakt/generated.toml`
-and every `gen page`, `gen resource`, `gen auth`, `gen island` and
-`gen live` appends its arguments (running the same command twice records
+and every `gen page`, `gen resource`, `gen auth`, `gen island`,
+`gen live` and `gen deploy` appends its arguments (running the same command twice records
 it once). Commit the file. If you delete a resource or page, delete its
 entry; if you renamed one, adjust it.
 

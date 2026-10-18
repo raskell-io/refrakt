@@ -1,7 +1,8 @@
 //// The generator manifest, `.refrakt/generated.toml`.
 ////
 //// `refrakt new` creates it and every generator that writes templates
-//// (`gen page`, `gen resource`, `gen auth`, `gen island`, `gen live`)
+//// (`gen page`, `gen resource`, `gen auth`, `gen island`, `gen live`,
+//// `gen deploy`)
 //// appends its arguments. `refrakt diff` replays the entries, in order, to
 //// render what the current templates would generate for the app.
 ////

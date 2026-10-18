@@ -8,6 +8,7 @@ import gleam/io
 import gleam/string
 import refrakt_cli/assets
 import refrakt_cli/build
+import refrakt_cli/deploy
 import refrakt_cli/dev
 import refrakt_cli/diff
 import refrakt_cli/gen
@@ -25,6 +26,7 @@ pub fn main() {
     ["gen", "auth", ..] -> gen.auth()
     ["gen", "island", name, ..] -> gen.island(name)
     ["gen", "live", name, ..] -> gen.live(name)
+    ["gen", "deploy", ..flags] -> deploy.run(flags)
     ["routes", ..] -> routes.run()
     ["diff", ..args] -> diff.main(args)
     ["migrate", ..] -> migrate_cmd.run()
@@ -67,6 +69,8 @@ fn print_help() {
       "  gen auth                          Generate starter authentication",
       "  gen island <name>                 Generate a Lustre interactive island",
       "  gen live <name>                   Generate a Lustre server component",
+      "  gen deploy                        Generate a Dockerfile and .dockerignore",
+      "    --fly                           Also generate fly.toml for Fly.io",
       "",
       "  routes                            Print the route table",
       "  diff [path...]                    Diff the app against what this CLI generates",

@@ -8,9 +8,12 @@ record, or a `ConfigError` that stops the app from starting.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `HOST` | `localhost` | Interface the server listens on; containers use `0.0.0.0` (the `gen deploy` Dockerfile sets it) |
 | `PORT` | `4000` | HTTP server port |
 | `SECRET_KEY_BASE` | dev fallback, none in prod | Secret for signing cookies (64+ bytes) |
 | `APP_ENV` | `dev` (with a startup warning) | Environment: `dev`, `test`, or `prod` |
+| `DATABASE_URL` | local `<app>_dev` / `<app>_test` | PostgreSQL connection URL (`data/repo.gleam`) |
+| `DATABASE_PATH` | `<app>.db` | SQLite database file outside of tests (`data/repo.gleam`) |
 | `REFRAKT_LIVE_RELOAD_PORT` | `35729`, set by `refrakt dev` | Port of the live reload event stream; see [`refrakt dev`](cli.md#refrakt-dev) |
 
 `refrakt dev` sets `APP_ENV=dev` itself. Running the app any other way
@@ -24,6 +27,7 @@ Every generated project includes `src/<app>/config.gleam`:
 ```gleam
 pub type Config {
   Config(
+    host: String,
     port: Int,
     port_string: String,
     secret_key_base: String,
@@ -46,6 +50,8 @@ pub type ConfigError {
 const development_secret_key_base = "dev-secret-key-base-..."
 
 pub fn load() -> Result(Config, ConfigError) {
+  let host = envoy.get("HOST") |> result.unwrap("localhost")
+
   let port =
     envoy.get("PORT")
     |> result.try(int.parse)
@@ -60,6 +66,7 @@ pub fn load() -> Result(Config, ConfigError) {
   use secret_key_base <- result.try(load_secret_key_base(env))
 
   Ok(Config(
+    host: host,
     port: port,
     port_string: int.to_string(port),
     secret_key_base: secret_key_base,
@@ -91,6 +98,11 @@ with `openssl rand -hex 64`.
 
 In tests, `let assert Ok(cfg) = config.load()` gives the development
 configuration.
+
+`main` passes `cfg.host` to `mist.bind`. The default, `localhost`, keeps
+a development server off the network; in a container nothing outside
+reaches it, so the Dockerfile of `refrakt gen deploy` sets
+`HOST=0.0.0.0`.
 
 ## Adding custom config
 

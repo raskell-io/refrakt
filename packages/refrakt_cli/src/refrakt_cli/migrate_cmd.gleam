@@ -95,6 +95,7 @@ pub fn migrate_module_postgres(app: String) -> String {
   "/// Run pending database migrations.
 ///
 /// Usage: gleam run -m " <> app <> "/migrate
+/// In a release built by `refrakt gen deploy`'s Dockerfile: bin/migrate
 ///
 /// Each migration file runs in one transaction together with the row that
 /// records it in `_migrations`, so a failing migration is rolled back whole.
@@ -111,7 +112,13 @@ import pog
 import refrakt/migrate
 
 pub fn main() {
-  let assert Ok(cfg) = config.load()
+  let cfg = case config.load() {
+    Ok(cfg) -> cfg
+    Error(error) -> {
+      io.println_error(\"Refusing to migrate: \" <> config.describe_error(error))
+      halt(1)
+    }
+  }
   let assert Ok(db) = repo.connect(cfg)
   let migrations_dir = \"src/" <> app <> "/data/migrations\"
 
@@ -151,7 +158,11 @@ pub fn main() {
   {
     Ok(count) ->
       io.println(\"Done. \" <> int.to_string(count) <> \" migration(s) applied.\")
-    Error(err) -> io.println(\"Error: \" <> err)
+    Error(err) -> {
+      io.println(\"Error: \" <> err)
+      // A non-zero exit status, so a deploy that runs migrations stops
+      halt(1)
+    }
   }
 }
 
@@ -159,6 +170,10 @@ fn name_decoder() -> decode.Decoder(String) {
   use name <- decode.field(0, decode.string)
   decode.success(name)
 }
+
+/// Stop the Erlang VM with an exit status.
+@external(erlang, \"erlang\", \"halt\")
+fn halt(status: Int) -> a
 
 fn describe_error(error: pog.QueryError) -> String {
   case error {
@@ -179,6 +194,7 @@ pub fn migrate_module_sqlite(app: String) -> String {
   "/// Run pending database migrations.
 ///
 /// Usage: gleam run -m " <> app <> "/migrate
+/// In a release built by `refrakt gen deploy`'s Dockerfile: bin/migrate
 ///
 /// Each migration file runs in one transaction together with the row that
 /// records it in `_migrations`, so a failing migration is rolled back whole.
@@ -194,7 +210,13 @@ import refrakt/migrate
 import sqlight
 
 pub fn main() {
-  let assert Ok(cfg) = config.load()
+  let cfg = case config.load() {
+    Ok(cfg) -> cfg
+    Error(error) -> {
+      io.println_error(\"Refusing to migrate: \" <> config.describe_error(error))
+      halt(1)
+    }
+  }
   let db_path = repo.database_path(cfg)
   let migrations_dir = \"src/" <> app <> "/data/migrations\"
 
@@ -226,7 +248,11 @@ pub fn main() {
   {
     Ok(count) ->
       io.println(\"Done. \" <> int.to_string(count) <> \" migration(s) applied.\")
-    Error(err) -> io.println(\"Error: \" <> err)
+    Error(err) -> {
+      io.println(\"Error: \" <> err)
+      // A non-zero exit status, so a deploy that runs migrations stops
+      halt(1)
+    }
   }
 }
 
@@ -239,6 +265,10 @@ fn name_decoder() -> decode.Decoder(String) {
   use name <- decode.field(0, decode.string)
   decode.success(name)
 }
+
+/// Stop the Erlang VM with an exit status.
+@external(erlang, \"erlang\", \"halt\")
+fn halt(status: Int) -> a
 "
 }
 

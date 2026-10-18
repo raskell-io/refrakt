@@ -365,6 +365,63 @@ pub fn gen_belongs_to_api_child_test() {
   })
 }
 
+pub fn gen_nested_belongs_to_builds_the_parent_chain_test() {
+  in_project("rel_chain", "postgres", fn(app) {
+    gen.resource("blogs", ["name:string", "tagline:optional(text)"])
+    gen.resource("posts", ["title:string", "--belongs-to", "blogs"])
+    gen.resource("comments", ["body:text", "--belongs-to", "posts"])
+    gen.resource("votes", ["up:bool", "--belongs-to", "comments", "--api"])
+
+    // Each parent gets a fixture that inserts its own parent first
+    let support = "test/" <> app <> "/support/"
+    let blog_fixture = support <> "blog_fixture.gleam"
+    file_contains(blog_fixture, "pub fn create(ctx: Context) -> Blog")
+    |> should.be_true
+    file_contains(blog_fixture, "tagline: option.None") |> should.be_true
+    file_contains(blog_fixture, "blog_repo.create(ctx.db, params)")
+    |> should.be_true
+    file_contains(blog_fixture, "_fixture") |> should.be_false
+
+    let post_fixture = support <> "post_fixture.gleam"
+    file_contains(post_fixture, "import " <> app <> "/support/blog_fixture")
+    |> should.be_true
+    file_contains(post_fixture, "blog_id: blog_fixture.create(ctx).id")
+    |> should.be_true
+    file_contains(
+      support <> "comment_fixture.gleam",
+      "post_fixture.create(ctx).id",
+    )
+    |> should.be_true
+    // Nothing belongs to votes
+    file_exists(support <> "vote_fixture.gleam") |> should.be_false
+
+    // The tests insert their parent through its fixture
+    let comment_test = "test/" <> app <> "/web/comment_handler_test.gleam"
+    file_contains(comment_test, "let post_id = post_fixture.create(ctx).id")
+    |> should.be_true
+    file_contains(comment_test, "fn create_post(") |> should.be_false
+    file_contains(
+      "test/" <> app <> "/web/vote_handler_test.gleam",
+      "let comment_id = comment_fixture.create(ctx).id",
+    )
+    |> should.be_true
+  })
+}
+
+pub fn gen_fixture_is_not_overwritten_test() {
+  in_project("rel_fixture_kept", "sqlite", fn(app) {
+    gen.resource("posts", ["title:string"])
+    gen.resource("comments", ["body:text", "--belongs-to", "posts"])
+    let fixture = "test/" <> app <> "/support/post_fixture.gleam"
+    file_contains(fixture, "post_repo.create(ctx.db_path, params)")
+    |> should.be_true
+
+    let assert Ok(_) = simplifile.write(fixture, "// edited\n")
+    gen.resource("likes", ["note:string", "--belongs-to", "posts"])
+    simplifile.read(fixture) |> should.equal(Ok("// edited\n"))
+  })
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================

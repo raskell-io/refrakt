@@ -370,7 +370,8 @@ fn generate_resource(
       resource_migration(name, fields, db, relation),
     )
 
-  // The DB-backed tests of a --belongs-to resource create a parent first
+  // The DB-backed tests of a --belongs-to resource insert a parent first,
+  // through test/<app>/support/<parent>_fixture.gleam
   let parent = case relation {
     Some(relation) -> parent_fixture(app, relation, db)
     None -> None
@@ -413,6 +414,10 @@ fn generate_resource(
     Some(children) -> list.append(created_paths, [children.component_path])
     None -> created_paths
   }
+  let fixture_paths = case parent {
+    Some(parent) -> parent.created
+    None -> []
+  }
   let patched_paths = case children {
     Some(Children(patched: Some(path), ..)) -> [path]
     _ -> []
@@ -431,7 +436,13 @@ fn generate_resource(
   }
   let router_path = "src/" <> app <> "/router.gleam"
   format.format_files(
-    list.flatten([[router_path], created_paths, patched_paths, test_db_paths]),
+    list.flatten([
+      [router_path],
+      created_paths,
+      patched_paths,
+      test_db_paths,
+      fixture_paths,
+    ]),
   )
 
   io.println("")
@@ -453,6 +464,7 @@ fn generate_resource(
     None -> Nil
   }
   list.each(test_db_paths, fn(path) { io.println("  " <> path) })
+  list.each(fixture_paths, fn(path) { io.println("  " <> path) })
   io.println("")
   io.println("Updated:")
   io.println("  " <> router_path)
@@ -3163,10 +3175,10 @@ fn api_resource_test(
 
   // With a --belongs-to parent, the bodies take the parent id: the tests
   // without a database send 1, the DB-backed ones a parent they create
-  let #(body_param, static_arg, db_arg, parent_setup, parent_fn, parent_imports) = case
+  let #(body_param, static_arg, db_arg, parent_setup, parent_imports) = case
     parent
   {
-    None -> #("", "", "", "", "", "")
+    None -> #("", "", "", "", "")
     Some(parent) -> {
       let field = parent.relation.field
       #(
@@ -3175,10 +3187,9 @@ fn api_resource_test(
         field,
         "\n  let "
           <> field
-          <> " = create_"
+          <> " = "
           <> parent.relation.singular
-          <> "(ctx)",
-        parent.create_fn,
+          <> "_fixture.create(ctx).id",
         parent.imports,
       )
     }
@@ -3422,93 +3433,236 @@ fn updated_body(" <> body_param <> ") -> String {
 " <> updated_fields <> "
   ])
   |> json.to_string
-}" <> parent_fn <> "
+}
 "
 }
 
-/// A parent row for the DB-backed tests of a `--belongs-to` resource.
+/// The parent of a `--belongs-to` resource, for its DB-backed tests: they
+/// insert one through `test/<app>/support/<parent>_fixture.gleam`.
 type ParentFixture {
   ParentFixture(
     relation: Relation,
-    /// `fn create_<parent>(ctx: Context) -> Int` and the imports it needs
-    create_fn: String,
+    /// `import <app>/support/<parent>_fixture`
     imports: String,
+    /// The fixture modules written for this resource (the parent's, and
+    /// those of its own parents that had none yet)
+    created: List(String),
   )
 }
 
-/// Build the parent of the generated tests from the parent's params type
-/// (`web/forms/<parent>_form.gleam`): a placeholder per field, `None` for
-/// optional ones. `None` when the params type cannot be read.
+/// Make sure the parent of a `--belongs-to` resource has a fixture module.
+/// `None` when the parent's params type cannot be read.
 fn parent_fixture(
   app: String,
   relation: Relation,
   db: DbChoice,
 ) -> Option(ParentFixture) {
-  let form = relation.singular <> "_form"
-  let params = relation.type_name <> "Params"
-  let path = "src/" <> app <> "/web/forms/" <> form <> ".gleam"
+  case ensure_fixture(app, relation.singular, db, []) {
+    Error(Nil) -> None
+    Ok(created) ->
+      Some(ParentFixture(
+        relation: relation,
+        imports: "\nimport "
+          <> app
+          <> "/support/"
+          <> relation.singular
+          <> "_fixture",
+        created: created,
+      ))
+  }
+}
+
+/// Write `test/<app>/support/<singular>_fixture.gleam` unless it exists:
+/// `create(ctx)` inserts a row of the resource with placeholder values.
+/// When the resource itself belongs to another one (its repo has
+/// `list_for_<parent>`), the fixture of that parent is written first and
+/// `create` inserts the parent before the row, so a whole chain such as
+/// blogs → posts → comments gets valid foreign keys.
+///
+/// Returns the paths written, parents first; `Error` when a params type
+/// (`web/forms/<singular>_form.gleam`) cannot be read.
+fn ensure_fixture(
+  app: String,
+  singular: String,
+  db: DbChoice,
+  seen: List(String),
+) -> Result(List(String), Nil) {
+  let path = "test/" <> app <> "/support/" <> singular <> "_fixture.gleam"
+  case simplifile.is_file(path) {
+    Ok(True) -> Ok([])
+    _ -> {
+      let seen = [singular, ..seen]
+      let repo =
+        simplifile.read("src/" <> app <> "/data/" <> singular <> "_repo.gleam")
+        |> result.unwrap("")
+      use fields <- result.try(params_fields(app, singular))
+      // `<parent>_id: Int` fields of a --belongs-to relation
+      let parent_of = fn(field: #(String, String)) -> Result(String, Nil) {
+        case field, string.ends_with(field.0, "_id") {
+          #(name, "Int"), True -> {
+            let parent = string.drop_end(name, 3)
+            case
+              string.contains(repo, "pub fn list_for_" <> parent <> "(")
+              && !list.contains(seen, parent)
+            {
+              True -> Ok(parent)
+              False -> Error(Nil)
+            }
+          }
+          _, _ -> Error(Nil)
+        }
+      }
+      let parents = list.filter_map(fields, parent_of)
+      use created <- result.try(
+        list.try_map(parents, ensure_fixture(app, _, db, seen)),
+      )
+      use args <- result.try(
+        list.try_map(fields, fn(field) {
+          let value = case parent_of(field) {
+            Ok(parent) -> Ok(parent <> "_fixture.create(ctx).id")
+            Error(Nil) -> placeholder_value(field.1)
+          }
+          use value <- result.map(value)
+          field.0 <> ": " <> value
+        }),
+      )
+      let _ = simplifile.create_directory_all("test/" <> app <> "/support")
+      let assert Ok(_) =
+        simplifile.write(path, fixture_module(app, singular, db, parents, args))
+      Ok(list.append(list.flatten(created), [path]))
+    }
+  }
+}
+
+/// The fields of `<Type>Params` in `web/forms/<singular>_form.gleam`, as
+/// `#(name, gleam_type)`.
+fn params_fields(
+  app: String,
+  singular: String,
+) -> Result(List(#(String, String)), Nil) {
+  let params = capitalize(singular) <> "Params"
+  let path = "src/" <> app <> "/web/forms/" <> singular <> "_form.gleam"
+  use content <- result.try(simplifile.read(path) |> result.replace_error(Nil))
+  use #(_, after) <- result.try(string.split_once(
+    content,
+    "pub type " <> params <> " {",
+  ))
+  use #(_, after) <- result.try(string.split_once(after, "("))
+  use #(body, _) <- result.try(string.split_once(after, "\n}"))
+  body
+  |> string.trim
+  |> string.drop_end(1)
+  |> string.split(",")
+  |> list.filter(fn(field) { string.trim(field) != "" })
+  |> list.try_map(fn(field) {
+    use #(name, gleam_type) <- result.map(string.split_once(field, ":"))
+    #(string.trim(name), string.trim(gleam_type))
+  })
+}
+
+/// A value of a params field for a fixture row.
+fn placeholder_value(gleam_type: String) -> Result(String, Nil) {
+  case gleam_type {
+    // also a valid date and timestamp
+    "String" -> Ok("\"2026-01-01\"")
+    "Int" -> Ok("1")
+    "Float" -> Ok("1.0")
+    "Bool" -> Ok("True")
+    "Option(" <> _ -> Ok("option.None")
+    _ -> Error(Nil)
+  }
+}
+
+fn fixture_module(
+  app: String,
+  singular: String,
+  db: DbChoice,
+  parents: List(String),
+  args: List(String),
+) -> String {
+  let type_name = capitalize(singular)
+  let args = string.join(args, ", ")
+  let option_import = case string.contains(args, "option.None") {
+    True -> "\nimport gleam/option"
+    False -> ""
+  }
+  let parent_imports =
+    parents
+    |> list.map(fn(parent) {
+      "\nimport " <> app <> "/support/" <> parent <> "_fixture"
+    })
+    |> string.concat
   let db_arg = case db {
     Sqlite -> "ctx.db_path"
     _ -> "ctx.db"
   }
-  let fields = {
-    use content <- result.try(
-      simplifile.read(path) |> result.replace_error(Nil),
-    )
-    use #(_, after) <- result.try(string.split_once(
-      content,
-      "pub type " <> params <> " {",
-    ))
-    use #(_, after) <- result.try(string.split_once(after, "("))
-    use #(body, _) <- result.try(string.split_once(after, "\n}"))
-    body
-    |> string.trim
-    |> string.drop_end(1)
-    |> string.split(",")
-    |> list.filter(fn(field) { string.trim(field) != "" })
-    |> list.try_map(fn(field) {
-      use #(name, gleam_type) <- result.try(string.split_once(field, ":"))
-      let value = case string.trim(gleam_type) {
-        // also a valid date and timestamp
-        "String" -> "\"2026-01-01\""
-        "Int" -> "1"
-        "Float" -> "1.0"
-        "Bool" -> "True"
-        "Option(" <> _ -> "option.None"
-        _ -> ""
-      }
-      case value {
-        "" -> Error(Nil)
-        _ -> Ok(string.trim(name) <> ": " <> value)
-      }
-    })
+  let parent_doc = case parents {
+    [] -> ""
+    _ ->
+      "\n///\n/// It first inserts the "
+      <> string.join(parents, " and the ")
+      <> " it belongs to, through "
+      <> string.join(list.map(parents, fn(p) { p <> "_fixture" }), " and ")
+      <> "."
   }
-  case fields {
-    Error(_) -> None
-    Ok(fields) -> {
-      let args = string.join(fields, ", ")
-      let option_import = case string.contains(args, "option.None") {
-        True -> "\nimport gleam/option"
-        False -> ""
-      }
-      Some(ParentFixture(relation: relation, create_fn: "
+  "//// A "
+  <> singular
+  <> " row for tests, written by `refrakt gen resource` for the
+//// tests of the resources that belong to it. Edit the values freely.
 
-/// A " <> relation.singular <> " for the records to belong to.
-fn create_" <> relation.singular <> "(ctx: Context) -> Int {
-  let assert Ok(" <> relation.singular <> ") =
-    " <> relation.singular <> "_repo.create(" <> db_arg <> ", " <> form <> "." <> params <> "(" <> args <> "))
-  " <> relation.singular <> ".id
-}", imports: option_import
-        <> "\nimport "
-        <> app
-        <> "/data/"
-        <> relation.singular
-        <> "_repo\nimport "
-        <> app
-        <> "/web/forms/"
-        <> form))
-    }
-  }
+import "
+  <> app
+  <> "/context.{type Context}
+import "
+  <> app
+  <> "/data/"
+  <> singular
+  <> "_repo
+import "
+  <> app
+  <> "/domain/"
+  <> singular
+  <> ".{type "
+  <> type_name
+  <> "}"
+  <> parent_imports
+  <> "
+import "
+  <> app
+  <> "/web/forms/"
+  <> singular
+  <> "_form"
+  <> option_import
+  <> "
+
+/// Insert a "
+  <> singular
+  <> " with placeholder values into the test database
+/// of `ctx` (see test_db.with_context) and return it."
+  <> parent_doc
+  <> "
+pub fn create(ctx: Context) -> "
+  <> type_name
+  <> " {
+  let params = "
+  <> singular
+  <> "_form."
+  <> type_name
+  <> "Params("
+  <> args
+  <> ")
+  let assert Ok("
+  <> singular
+  <> ") = "
+  <> singular
+  <> "_repo.create("
+  <> db_arg
+  <> ", params)
+  "
+  <> singular
+  <> "
+}
+"
 }
 
 fn resource_test(
@@ -3522,18 +3676,18 @@ fn resource_test(
 ) -> String {
   // With a --belongs-to parent, the DB-backed tests create one and send
   // its id instead of the sample value
-  let #(parent_setup, with_parent, sample_fields, parent_fn, parent_imports) = case
+  let #(parent_setup, with_parent, sample_fields, parent_imports) = case
     parent
   {
-    None -> #("", fn(values: String) { values }, fields, "", "")
+    None -> #("", fn(values: String) { values }, fields, "")
     Some(parent) -> {
       let field = parent.relation.field
       #(
         "\n  let "
           <> field
-          <> " = create_"
+          <> " = "
           <> parent.relation.singular
-          <> "(ctx)",
+          <> "_fixture.create(ctx).id",
         fn(values: String) {
           "[#(\""
           <> field
@@ -3544,7 +3698,6 @@ fn resource_test(
           <> "]"
         },
         list.filter(fields, fn(f) { f.0 != field }),
-        parent.create_fn,
         "\nimport gleam/int" <> parent.imports,
       )
     }
@@ -3698,7 +3851,7 @@ fn updated_form_values() -> List(#(String, String)) {
   [
 " <> sample_form_values(sample_fields, True) <> "
   ]
-}" <> parent_fn <> "
+}
 "
 
   "import gleam/http
@@ -3963,7 +4116,8 @@ fn split_after_imports(
   }
 }
 
-fn add_route(content: String, route_line: String) -> String {
+/// Insert route lines into a router's source before its catch-all.
+pub fn add_route(content: String, route_line: String) -> String {
   // Insert before the catch-all `_, _ ->` pattern
   case string.split_once(content, "    _, _ ->") {
     Ok(#(before, after)) -> before <> route_line <> "\n    _, _ ->" <> after
