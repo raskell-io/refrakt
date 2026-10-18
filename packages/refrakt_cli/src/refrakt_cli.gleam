@@ -38,7 +38,7 @@ pub fn main() {
     ["dev", ..] -> dev.run()
     ["help", ..] | ["--help", ..] | ["-h", ..] -> print_help()
     ["version", ..] | ["--version", ..] | ["-v", ..] ->
-      io.println("refrakt_cli 0.6.0")
+      io.println("refrakt_cli 0.7.0")
     [cmd, ..] -> {
       io.println("Unknown command: " <> cmd)
       io.println("")
