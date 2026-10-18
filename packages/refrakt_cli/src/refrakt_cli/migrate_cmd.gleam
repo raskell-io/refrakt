@@ -112,7 +112,13 @@ import pog
 import refrakt/migrate
 
 pub fn main() {
-  let assert Ok(cfg) = config.load()
+  let cfg = case config.load() {
+    Ok(cfg) -> cfg
+    Error(error) -> {
+      io.println_error(\"Refusing to migrate: \" <> config.describe_error(error))
+      halt(1)
+    }
+  }
   let assert Ok(db) = repo.connect(cfg)
   let migrations_dir = \"src/" <> app <> "/data/migrations\"
 
@@ -204,7 +210,13 @@ import refrakt/migrate
 import sqlight
 
 pub fn main() {
-  let assert Ok(cfg) = config.load()
+  let cfg = case config.load() {
+    Ok(cfg) -> cfg
+    Error(error) -> {
+      io.println_error(\"Refusing to migrate: \" <> config.describe_error(error))
+      halt(1)
+    }
+  }
   let db_path = repo.database_path(cfg)
   let migrations_dir = \"src/" <> app <> "/data/migrations\"
 
