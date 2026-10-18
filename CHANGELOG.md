@@ -6,6 +6,32 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`refrakt gen deploy [--fly]` (#26):** writes a multi-stage
+  `Dockerfile` (Gleam 1.19.2 / Erlang/OTP 29.1.1 Alpine build stage
+  with `build-base` for the argus and sqlight NIFs, `gleam export
+  erlang-shipment`; slim `erlang:29.1.1-alpine` runtime as a non-root
+  user with `APP_ENV=prod`, `HOST=0.0.0.0`, `PORT`, `EXPOSE` and a
+  `HEALTHCHECK`), a `.dockerignore`, and with `--fly` a `fly.toml`
+  (health check, `release_command` on Postgres, `/data` volume on
+  SQLite). Apps with a database get `bin/migrate`, which runs the
+  compiled `<app>/migrate` module from the shipment
+  (`erl ... -eval '<app>@@main:run(<app>@migrate)'`): SQLite images run
+  it on start, Postgres deploys before a release. Adds `GET /healthz`
+  to the router when there is no health route. Never overwrites a file.
+- New apps read `HOST` (default `localhost`) and listen on it through
+  `mist.bind(cfg.host)`, and SQLite apps read `DATABASE_PATH` (default
+  `<app>.db`). For an existing app, add the `host` config field and
+  `|> mist.bind(cfg.host)` after `|> mist.new`, and read `DATABASE_PATH`
+  in `repo.database_path`; `gen deploy` warns when they are missing.
+
+### Changed
+
+- The generated `src/<app>/migrate.gleam` exits with status 1 when a
+  migration fails, so a deploy that runs it stops. Delete an existing
+  copy and run `refrakt migrate` (or `gen deploy`) to regenerate it.
+
 ### Fixed
 
 - **Nested `--belongs-to` tests on Postgres (#44):** the DB-backed tests

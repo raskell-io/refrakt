@@ -135,6 +135,7 @@ pub fn main() {
   let assert Ok(_) =
     wisp_mist.handler(router.handle_request(_, ctx), cfg.secret_key_base)
     |> mist.new
+    |> mist.bind(cfg.host)
     |> mist.port(cfg.port)
     |> mist.start
 
@@ -171,6 +172,9 @@ import gleam/string
 
 pub type Config {
   Config(
+    /// The interface the server listens on: HOST, or localhost. A
+    /// container sets HOST=0.0.0.0 so that requests from outside reach it.
+    host: String,
     port: Int,
     port_string: String,
     secret_key_base: String,
@@ -199,6 +203,8 @@ pub type ConfigError {
 const development_secret_key_base = \"dev-secret-key-base-that-is-at-least-64-bytes-long-for-security!!\"
 
 pub fn load() -> Result(Config, ConfigError) {
+  let host = envoy.get(\"HOST\") |> result.unwrap(\"localhost\")
+
   let port =
     envoy.get(\"PORT\")
     |> result.try(int.parse)
@@ -213,6 +219,7 @@ pub fn load() -> Result(Config, ConfigError) {
   use secret_key_base <- result.try(load_secret_key_base(env))
 
   Ok(Config(
+    host: host,
     port: port,
     port_string: int.to_string(port),
     secret_key_base: secret_key_base,
@@ -440,12 +447,16 @@ pub fn connect(cfg: Config) -> Result(pog.Connection, Nil) {
 }
 "
     Sqlite -> "import " <> name <> "/config.{type Config}
+import envoy
+import gleam/result
 
-/// Get the SQLite database path for the current environment.
+/// Get the SQLite database path for the current environment: in
+/// development and production DATABASE_PATH, or `" <> name <> ".db` in the
+/// working directory. Tests use their own in-memory databases.
 pub fn database_path(cfg: Config) -> String {
   case cfg.env {
     config.Test -> \":memory:\"
-    _ -> \"" <> name <> ".db\"
+    _ -> envoy.get(\"DATABASE_PATH\") |> result.unwrap(\"" <> name <> ".db\")
   }
 }
 "

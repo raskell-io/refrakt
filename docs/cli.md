@@ -209,6 +209,43 @@ See [Authentication](authentication.md) for details.
 
 ---
 
+### `refrakt gen deploy [--fly]`
+
+Generate the files to run the app in a container.
+
+```bash
+refrakt gen deploy          # Dockerfile, .dockerignore
+refrakt gen deploy --fly    # also fly.toml
+```
+
+**Creates** (each only if it does not exist; existing files are listed
+as skipped and left alone):
+
+- `Dockerfile`: a build stage on `ghcr.io/gleam-lang/gleam` (Erlang,
+  Alpine) with a C toolchain for NIFs (argus, sqlight) that runs
+  `gleam export erlang-shipment`, and a runtime stage on the matching
+  `erlang` Alpine image that runs the shipment as a non-root user with
+  `APP_ENV=prod`, `HOST=0.0.0.0`, `PORT=4000` and a `HEALTHCHECK`.
+- `.dockerignore`: `build`, `.git`, SQLite files, `.env` files.
+- With a database: `bin/migrate`, which runs `src/<app>/migrate.gleam`
+  from the shipment, and that module if `refrakt migrate` has not
+  written it yet. SQLite images migrate on start, Postgres ones through
+  `bin/migrate` before a release.
+- With `--fly`: `fly.toml` with the app name, internal port,
+  `APP_ENV=prod`, an HTTP health check, and a `release_command`
+  (Postgres) or a volume mount on `/data` (SQLite).
+
+**Patches:** `router.gleam` with `GET /healthz` (200) unless it already
+has a `["healthz"]` or `["health"]` route, which the health checks then
+use.
+
+Prints the `docker build` / `docker run` and `fly` commands to run
+next, and warns when gleam.toml requires a Gleam the image does not
+have, or when an app generated before 0.7 does not read `HOST` or
+`DATABASE_PATH`. See [Deployment](deployment.md).
+
+---
+
 ### `refrakt gen island <name>`
 
 Generate a Lustre interactive island.

@@ -4109,7 +4109,8 @@ fn split_after_imports(
   }
 }
 
-fn add_route(content: String, route_line: String) -> String {
+/// Insert route lines into a router's source before its catch-all.
+pub fn add_route(content: String, route_line: String) -> String {
   // Insert before the catch-all `_, _ ->` pattern
   case string.split_once(content, "    _, _ ->") {
     Ok(#(before, after)) -> before <> route_line <> "\n    _, _ ->" <> after
